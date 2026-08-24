@@ -16,7 +16,7 @@ Place the Bird Banding Laboratory data extract
 
 `NABBP_2025_grp_13.csv`
 
-in the working directory containing the R scripts. The filename is the original name of the BBL extract used for the analysis.
+in the working directory containing the R scripts. The file can be downloaded at [ScienceBase](https://www.sciencebase.gov/catalog/item/68837a85d4be027deba86316).
 
 ## Run order
 
