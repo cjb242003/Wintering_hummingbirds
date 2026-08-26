@@ -1,12 +1,13 @@
 # ============================================================
 # 04_figures.R
-# Generate Figures 1-4 from the fitted primary analysis objects.
+# Generate Figures 1-4 and main-text Table 1 from the fitted primary analysis objects.
 # Run 02_primary_analysis.R first.
 #
 # Figure 1: age x sex composition for all six study species
 # Figure 2: geographic sampling coverage for the three focal species
 # Figure 3: model-predicted P(Female) by species and age class
 # Figure 4: age-specific latitude and longitude slopes
+# Table 1: within-species immature-adult differences in geographic slopes
 # ============================================================
 
 
@@ -19,6 +20,8 @@ library(scales)
 library(sf)
 library(rnaturalearth)
 library(rnaturalearthdata)
+library(flextable)
+library(officer)
 
 
 # ============================================================
@@ -114,6 +117,66 @@ get_ci_cols <- function(x) {
   }
   
   c(lower = lower, upper = upper)
+}
+
+
+fmt_p <- function(x) {
+  ifelse(
+    is.na(x),
+    "",
+    ifelse(
+      x < 0.001,
+      "<0.001",
+      sprintf("%.3f", x)
+    )
+  )
+}
+
+
+standardize_emm <- function(x, axis, result_type) {
+  x <- as.data.frame(x)
+  ci <- get_ci_cols(x)
+  
+  if ("estimate" %in% names(x)) {
+    est <- x$estimate
+  } else {
+    trend_col <- grep("\\.trend$", names(x), value = TRUE)[1]
+    
+    if (length(trend_col) == 0L || is.na(trend_col)) {
+      stop("Could not identify trend column.")
+    }
+    
+    est <- x[[trend_col]]
+  }
+  
+  tibble(
+    Axis = axis,
+    Result = result_type,
+    Species =
+      if ("Species" %in% names(x)) as.character(x$Species) else "",
+    Age =
+      if ("Immature_f" %in% names(x)) as.character(x$Immature_f) else "",
+    Contrast =
+      if ("contrast" %in% names(x)) as.character(x$contrast) else "",
+    Estimate = est,
+    SE = x$SE,
+    CI_low = x[[ci["lower"]]],
+    CI_high = x[[ci["upper"]]],
+    z =
+      if ("z.ratio" %in% names(x)) x$z.ratio else NA_real_,
+    p = x$p.value
+  )
+}
+
+
+nice_ft <- function(x, font_size = 9) {
+  flextable(x) %>%
+    theme_booktabs() %>%
+    fontsize(size = font_size, part = "all") %>%
+    bold(part = "header") %>%
+    align(align = "center", part = "header") %>%
+    valign(valign = "center", part = "all") %>%
+    autofit()
 }
 
 
@@ -1443,6 +1506,76 @@ fig4 <- ggplot(
 
 
 # ============================================================
+# TABLE 1
+# Within-species age differences in geographic slopes
+# ============================================================
+
+table_1 <- bind_rows(
+  standardize_emm(
+    comparative_primary$latitude_age_differences,
+    "Latitude",
+    "Immature – Adult"
+  ),
+  standardize_emm(
+    comparative_primary$longitude_age_differences,
+    "Longitude",
+    "Immature – Adult"
+  )
+) %>%
+  transmute(
+    Axis,
+    Species,
+    Contrast = gsub(
+      " - ",
+      " – ",
+      Contrast,
+      fixed = TRUE
+    ),
+    Estimate = round(Estimate, 3),
+    SE = round(SE, 3),
+    `95% CI` = sprintf("%.3f to %.3f", CI_low, CI_high),
+    z = round(z, 3),
+    p = fmt_p(p)
+  )
+
+ft_table_1 <- nice_ft(table_1) %>%
+  width(j = "Axis", width = 0.9) %>%
+  width(j = "Species", width = 1.25) %>%
+  width(j = "Contrast", width = 1.4) %>%
+  width(j = "Estimate", width = 0.8) %>%
+  width(j = "SE", width = 0.65) %>%
+  width(j = "95% CI", width = 1.35) %>%
+  width(j = "z", width = 0.65) %>%
+  width(j = "p", width = 0.65) %>%
+  set_caption(
+    caption = paste0(
+      "Table 1. Within-species differences between immature and adult ",
+      "geographic sex-ratio slopes in the primary comparative model. ",
+      "Estimates represent the immature–adult difference in change in ",
+      "log-odds of a record being female per 5° geographic change. ",
+      "Positive estimates indicate a more positive geographic slope ",
+      "among immatures than adults."
+    )
+  )
+
+table_1_doc <- read_docx()
+
+table_1_doc <- body_end_section_landscape(
+  table_1_doc
+)
+
+table_1_doc <- body_add_flextable(
+  table_1_doc,
+  ft_table_1
+)
+
+print(
+  table_1_doc,
+  target = "Table1.docx"
+)
+
+
+# ============================================================
 # SAVE FIGURES AS PNG AND VECTOR PDF
 # ============================================================
 
@@ -1513,4 +1646,3 @@ ggsave(
   height = 6,
   bg = "white"
 )
-
