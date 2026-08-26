@@ -7,7 +7,7 @@ This repository contains the R code used for the primary analyses, sensitivity a
 - `01_functions.R` — reusable data-preparation, model-fitting, and robustness-analysis functions.
 - `02_primary_analysis.R` — reads the BBL data, builds the six species datasets, fits the primary three-species GLMM, and generates the standardized Rufous latitude predictions reported in the manuscript.
 - `03_sensitivity_analysis.R` — runs missing-data bounds, January age-classification checks, temporal-confounding analyses, leave-one-high-volume-location-out analyses, primary-model diagnostics, and nonlinear spatial GAMM sensitivity analyses.
-- `04_figures.R` — generates Figures 1-4 and saves each figure as both PNG and vector PDF.
+- `04_figures.R` — generates Figures 1-4 and saves each figure as both PNG and vector PDF. Also generates Table 1.
 - `05_supplement.R` — generates Supplementary Tables S1-S14 and saves them as `Supplementary_Tables.docx`.
 
 ## Input data
@@ -49,6 +49,7 @@ Running `04_figures.R` creates:
 - `Figure2.png` and `Figure2.pdf`
 - `Figure3.png` and `Figure3.pdf`
 - `Figure4.png` and `Figure4.pdf`
+- `Table1.docx`
 
 The PDF files are vector graphics suitable for publication and remain sharp when enlarged.
 
