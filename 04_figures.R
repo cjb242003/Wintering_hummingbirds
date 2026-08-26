@@ -3,8 +3,8 @@
 # Generate Figures 1-4 and main-text Table 1 from the fitted primary analysis objects.
 # Run 02_primary_analysis.R first.
 #
-# Figure 1: age x sex composition for all six study species
-# Figure 2: geographic sampling coverage for the three focal species
+# Figure 1: geographic sampling coverage for the three focal species
+# Figure 2: age x sex composition for all six study species
 # Figure 3: model-predicted P(Female) by species and age class
 # Figure 4: age-specific latitude and longitude slopes
 # Table 1: within-species immature-adult differences in geographic slopes
@@ -87,7 +87,7 @@ stopifnot(
 )
 
 
-# Load map boundaries shared by Figures 2 and 3.
+# Load map boundaries shared by Figures 1 and 3.
 us_states <- map_data("state")
 
 world_map <- map_data("world") %>%
@@ -182,8 +182,288 @@ nice_ft <- function(x, font_size = 9) {
 
 # ============================================================
 # FIGURE 1
+# Geographic coverage of primary-analysis records
+# ============================================================
+
+# ------------------------------------------------------------
+# 1.1 Build the common 100-km grid used for sampling counts
+# ------------------------------------------------------------
+
+land <- rnaturalearth::ne_countries(
+  country = c(
+    "United States of America",
+    "Canada"
+  ),
+  returnclass = "sf"
+)
+
+land_5070 <- st_transform(
+  land,
+  5070
+)
+
+land_union_5070 <- st_union(
+  land_5070
+)
+
+grid_geom <- st_make_grid(
+  land_union_5070,
+  cellsize = c(
+    100000,
+    100000
+  ),
+  what = "polygons",
+  square = TRUE
+)
+
+grid_5070 <- st_sf(
+  cell_id = seq_along(
+    grid_geom
+  ),
+  geometry = grid_geom
+)
+
+grid_5070 <- grid_5070[
+  lengths(
+    st_intersects(
+      grid_5070,
+      land_union_5070
+    )
+  ) > 0,
+  ,
+  drop = FALSE
+]
+
+
+# ------------------------------------------------------------
+# 1.2 Assign primary-analysis records to grid cells by species
+# ------------------------------------------------------------
+
+make_sampling_cells <- function(
+    res,
+    species_name
+) {
+  pts <- st_as_sf(
+    res$data_points,
+    coords = c(
+      "lon_dd",
+      "lat_dd"
+    ),
+    crs = 4326,
+    remove = FALSE
+  ) %>%
+    st_transform(
+      5070
+    )
+  
+  counts <- st_join(
+    pts,
+    grid_5070,
+    join = st_intersects,
+    left = FALSE
+  ) %>%
+    st_drop_geometry() %>%
+    count(
+      cell_id,
+      name = "N"
+    )
+  
+  # Every primary-analysis record must be assigned exactly once.
+  if (sum(counts$N) != nrow(res$data_points)) {
+    stop(
+      "Figure 1 grid assignment did not preserve the exact number of ",
+      "primary-analysis records for ", species_name, "."
+    )
+  }
+  
+  grid_5070 %>%
+    inner_join(
+      counts,
+      by = "cell_id"
+    ) %>%
+    mutate(
+      Species = species_name
+    ) %>%
+    st_transform(
+      4326
+    )
+}
+
+
+sampling_sf <- do.call(
+  rbind,
+  lapply(
+    focal_display_order,
+    function(sp) {
+      make_sampling_cells(
+        results[[sp]],
+        sp
+      )
+    }
+  )
+)
+
+sampling_sf$Species <- factor(
+  sampling_sf$Species,
+  levels = focal_display_order
+)
+
+
+# ------------------------------------------------------------
+# 1.3 Set the plotting extent from occupied grid cells
+# ------------------------------------------------------------
+
+fig1_bbox <- st_bbox(
+  sampling_sf
+)
+
+fig1_extent_pad <- 0.5
+
+fig1_xlim <- c(
+  min(-102, unname(fig1_bbox["xmin"]) - fig1_extent_pad),
+  max(-72.5, unname(fig1_bbox["xmax"]) + fig1_extent_pad)
+)
+
+fig1_ylim <- c(
+  min(24, unname(fig1_bbox["ymin"]) - fig1_extent_pad),
+  max(43.5, unname(fig1_bbox["ymax"]) + fig1_extent_pad)
+)
+
+
+# ------------------------------------------------------------
+# 1.4 Build Figure 1
+# ------------------------------------------------------------
+
+fig1 <- ggplot() +
+  geom_path(
+    data = world_map,
+    aes(
+      x = long,
+      y = lat,
+      group = group
+    ),
+    inherit.aes = FALSE,
+    colour = "grey50",
+    linewidth = 0.35
+  ) +
+  geom_path(
+    data = us_states,
+    aes(
+      x = long,
+      y = lat,
+      group = group
+    ),
+    inherit.aes = FALSE,
+    colour = "grey75",
+    linewidth = 0.25
+  ) +
+  geom_sf(
+    data = sampling_sf,
+    aes(
+      fill = N
+    ),
+    inherit.aes = FALSE,
+    color = "white",
+    linewidth = 0.1
+  ) +
+  facet_wrap(
+    ~ Species,
+    ncol = 2
+  ) +
+  coord_sf(
+    xlim = fig1_xlim,
+    ylim = fig1_ylim,
+    expand = FALSE,
+    default_crs = st_crs(
+      4326
+    )
+  ) +
+  scale_fill_viridis_c(
+    trans = "log10",
+    breaks = c(
+      1,
+      3,
+      10,
+      30,
+      100,
+      300,
+      1000
+    ),
+    labels = scales::comma,
+    name = "Records per 100 x 100 km cell"
+  ) +
+  theme_void(
+    base_size = 11
+  ) +
+  theme(
+    strip.text = element_text(
+      face = "bold",
+      size = 12,
+      margin = margin(
+        t = 0,
+        b = 11
+      )
+    ),
+    strip.background = element_blank(),
+    panel.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    legend.position = c(
+      0.63,
+      0.13
+    ),
+    legend.justification = c(
+      0,
+      0
+    ),
+    legend.title = element_text(
+      size = 11,
+      face = "plain",
+      margin = margin(
+        b = 10
+      )
+    ),
+    legend.text = element_text(
+      size = 9
+    ),
+    legend.background = element_rect(
+      fill = scales::alpha(
+        "white",
+        0.9
+      ),
+      colour = NA
+    ),
+    panel.spacing.x = grid::unit(
+      3,
+      "mm"
+    ),
+    panel.spacing.y = grid::unit(
+      3,
+      "mm"
+    ),
+    plot.margin = margin(
+      t = 20,
+      r = 20,
+      b = 20,
+      l = 20,
+      unit = "pt"
+    )
+  )
+
+
+# ============================================================
+# FIGURE 2
 # Age x sex composition across all six study species
 # ============================================================
+
+# ------------------------------------------------------------
+# 2.1 Summarize age x sex composition for each retained species
+# ------------------------------------------------------------
 
 class_levels <- c(
   "Adult Female",
@@ -235,6 +515,10 @@ composition_df <- purrr::imap_dfr(
   )
 
 
+# ------------------------------------------------------------
+# 2.2 Define species labels and demographic-class colors
+# ------------------------------------------------------------
+
 species_labels <- composition_df %>%
   distinct(
     Species,
@@ -263,7 +547,11 @@ class_colors <- c(
 )
 
 
-fig1 <- ggplot(
+# ------------------------------------------------------------
+# 2.3 Build Figure 2
+# ------------------------------------------------------------
+
+fig2 <- ggplot(
   composition_df,
   aes(
     x = Prop,
@@ -358,268 +646,6 @@ fig1 <- ggplot(
     panel.grid.major.x = element_line(
       linewidth = 0.2,
       color = "grey90"
-    ),
-    plot.margin = margin(
-      t = 20,
-      r = 20,
-      b = 20,
-      l = 20,
-      unit = "pt"
-    )
-  )
-
-
-# ============================================================
-# FIGURE 2
-# Geographic coverage of primary-analysis records
-# ============================================================
-
-# Build the common 100-km grid used for sampling counts.
-land <- rnaturalearth::ne_countries(
-  country = c(
-    "United States of America",
-    "Canada"
-  ),
-  returnclass = "sf"
-)
-
-land_5070 <- st_transform(
-  land,
-  5070
-)
-
-land_union_5070 <- st_union(
-  land_5070
-)
-
-grid_geom <- st_make_grid(
-  land_union_5070,
-  cellsize = c(
-    100000,
-    100000
-  ),
-  what = "polygons",
-  square = TRUE
-)
-
-grid_5070 <- st_sf(
-  cell_id = seq_along(
-    grid_geom
-  ),
-  geometry = grid_geom
-)
-
-grid_5070 <- grid_5070[
-  lengths(
-    st_intersects(
-      grid_5070,
-      land_union_5070
-    )
-  ) > 0,
-  ,
-  drop = FALSE
-]
-
-
-make_sampling_cells <- function(
-    res,
-    species_name
-) {
-  pts <- st_as_sf(
-    res$data_points,
-    coords = c(
-      "lon_dd",
-      "lat_dd"
-    ),
-    crs = 4326,
-    remove = FALSE
-  ) %>%
-    st_transform(
-      5070
-    )
-  
-  counts <- st_join(
-    pts,
-    grid_5070,
-    join = st_intersects,
-    left = FALSE
-  ) %>%
-    st_drop_geometry() %>%
-    count(
-      cell_id,
-      name = "N"
-    )
-  
-  # Every primary-analysis record must be assigned exactly once.
-  if (sum(counts$N) != nrow(res$data_points)) {
-    stop(
-      "Figure 2 grid assignment did not preserve the exact number of ",
-      "primary-analysis records for ", species_name, "."
-    )
-  }
-  
-  grid_5070 %>%
-    inner_join(
-      counts,
-      by = "cell_id"
-    ) %>%
-    mutate(
-      Species = species_name
-    ) %>%
-    st_transform(
-      4326
-    )
-}
-
-
-sampling_sf <- do.call(
-  rbind,
-  lapply(
-    focal_display_order,
-    function(sp) {
-      make_sampling_cells(
-        results[[sp]],
-        sp
-      )
-    }
-  )
-)
-
-sampling_sf$Species <- factor(
-  sampling_sf$Species,
-  levels = focal_display_order
-)
-
-
-# Set the map extent to include every occupied 100-km cell.
-fig2_bbox <- st_bbox(
-  sampling_sf
-)
-
-fig2_extent_pad <- 0.5
-
-fig2_xlim <- c(
-  min(-102, unname(fig2_bbox["xmin"]) - fig2_extent_pad),
-  max(-72.5, unname(fig2_bbox["xmax"]) + fig2_extent_pad)
-)
-
-fig2_ylim <- c(
-  min(24, unname(fig2_bbox["ymin"]) - fig2_extent_pad),
-  max(43.5, unname(fig2_bbox["ymax"]) + fig2_extent_pad)
-)
-
-
-fig2 <- ggplot() +
-  geom_path(
-    data = world_map,
-    aes(
-      x = long,
-      y = lat,
-      group = group
-    ),
-    inherit.aes = FALSE,
-    colour = "grey50",
-    linewidth = 0.35
-  ) +
-  geom_path(
-    data = us_states,
-    aes(
-      x = long,
-      y = lat,
-      group = group
-    ),
-    inherit.aes = FALSE,
-    colour = "grey75",
-    linewidth = 0.25
-  ) +
-  geom_sf(
-    data = sampling_sf,
-    aes(
-      fill = N
-    ),
-    inherit.aes = FALSE,
-    color = "white",
-    linewidth = 0.1
-  ) +
-  facet_wrap(
-    ~ Species,
-    ncol = 2
-  ) +
-  coord_sf(
-    xlim = fig2_xlim,
-    ylim = fig2_ylim,
-    expand = FALSE,
-    default_crs = st_crs(
-      4326
-    )
-  ) +
-  scale_fill_viridis_c(
-    trans = "log10",
-    breaks = c(
-      1,
-      3,
-      10,
-      30,
-      100,
-      300,
-      1000
-    ),
-    labels = scales::comma,
-    name = "Records per 100 x 100 km cell"
-  ) +
-  theme_void(
-    base_size = 11
-  ) +
-  theme(
-    strip.text = element_text(
-      face = "bold",
-      size = 12,
-      margin = margin(
-        t = 0,
-        b = 11
-      )
-    ),
-    strip.background = element_blank(),
-    panel.background = element_rect(
-      fill = "white",
-      colour = NA
-    ),
-    plot.background = element_rect(
-      fill = "white",
-      colour = NA
-    ),
-    legend.position = c(
-      0.63,
-      0.13
-    ),
-    legend.justification = c(
-      0,
-      0
-    ),
-    legend.title = element_text(
-      size = 11,
-      face = "plain",
-      margin = margin(
-        b = 10
-      )
-    ),
-    legend.text = element_text(
-      size = 9
-    ),
-    legend.background = element_rect(
-      fill = scales::alpha(
-        "white",
-        0.9
-      ),
-      colour = NA
-    ),
-    panel.spacing.x = grid::unit(
-      3,
-      "mm"
-    ),
-    panel.spacing.y = grid::unit(
-      3,
-      "mm"
     ),
     plot.margin = margin(
       t = 20,
@@ -1582,8 +1608,8 @@ print(
 ggsave(
   "Figure1.png",
   fig1,
-  width = 8,
-  height = 5,
+  width = 9,
+  height = 8,
   dpi = 300,
   bg = "white"
 )
@@ -1591,8 +1617,8 @@ ggsave(
 ggsave(
   "Figure2.png",
   fig2,
-  width = 9,
-  height = 8,
+  width = 8,
+  height = 5,
   dpi = 300,
   bg = "white"
 )
@@ -1618,16 +1644,16 @@ ggsave(
 ggsave(
   "Figure1.pdf",
   fig1,
-  width = 8,
-  height = 5,
+  width = 9,
+  height = 8,
   bg = "white"
 )
 
 ggsave(
   "Figure2.pdf",
   fig2,
-  width = 9,
-  height = 8,
+  width = 8,
+  height = 5,
   bg = "white"
 )
 
