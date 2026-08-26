@@ -1605,12 +1605,15 @@ print(
 # SAVE FIGURES AS PNG AND VECTOR PDF
 # ============================================================
 
+# Export raster figures at 600 dpi for journal submission.
+figure_dpi <- 600
+
 ggsave(
   "Figure1.png",
   fig1,
   width = 9,
   height = 8,
-  dpi = 300,
+  dpi = figure_dpi,
   bg = "white"
 )
 
@@ -1619,7 +1622,7 @@ ggsave(
   fig2,
   width = 8,
   height = 5,
-  dpi = 300,
+  dpi = figure_dpi,
   bg = "white"
 )
 
@@ -1628,7 +1631,7 @@ ggsave(
   fig3,
   width = 8,
   height = 6,
-  dpi = 300,
+  dpi = figure_dpi,
   bg = "white"
 )
 
@@ -1637,7 +1640,7 @@ ggsave(
   fig4,
   width = 8,
   height = 6,
-  dpi = 300,
+  dpi = figure_dpi,
   bg = "white"
 )
 
