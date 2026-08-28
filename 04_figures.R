@@ -1533,62 +1533,204 @@ fig4 <- ggplot(
 
 # ============================================================
 # TABLE 1
-# Within-species age differences in geographic slopes
+# Within-species immature-adult differences in geographic slopes
 # ============================================================
 
-table_1 <- bind_rows(
-  standardize_emm(
-    comparative_primary$latitude_age_differences,
-    "Latitude",
-    "Immature – Adult"
-  ),
-  standardize_emm(
-    comparative_primary$longitude_age_differences,
-    "Longitude",
-    "Immature – Adult"
+
+# ------------------------------------------------------------
+# Formatting functions
+# ------------------------------------------------------------
+
+fmt_est <- function(x) {
+  out <- sprintf("%.2f", x)
+  
+  gsub(
+    "-",
+    "\u2212",
+    out,
+    fixed = TRUE
   )
+}
+
+
+fmt_p_manuscript <- function(x) {
+  case_when(
+    is.na(x) ~ "",
+    x < 0.001 ~ "<0.001",
+    x < 0.01 ~ sprintf("%.3f", x),
+    TRUE ~ sprintf("%.2f", x)
+  )
+}
+
+
+# ------------------------------------------------------------
+# Latitude contrasts
+# ------------------------------------------------------------
+
+table_1_lat <- standardize_emm(
+  comparative_primary$latitude_age_differences,
+  "Latitude",
+  "Immature – Adult"
 ) %>%
   transmute(
-    Axis,
     Species,
-    Contrast = gsub(
-      " - ",
-      " – ",
-      Contrast,
-      fixed = TRUE
+    Latitude_difference = paste0(
+      fmt_est(Estimate),
+      " (",
+      fmt_est(CI_low),
+      ", ",
+      fmt_est(CI_high),
+      ")"
     ),
-    Estimate = round(Estimate, 3),
-    SE = round(SE, 3),
-    `95% CI` = sprintf("%.3f to %.3f", CI_low, CI_high),
-    z = round(z, 3),
-    p = fmt_p(p)
+    Latitude_P = fmt_p_manuscript(p)
   )
 
-ft_table_1 <- nice_ft(table_1) %>%
-  width(j = "Axis", width = 0.9) %>%
-  width(j = "Species", width = 1.25) %>%
-  width(j = "Contrast", width = 1.4) %>%
-  width(j = "Estimate", width = 0.8) %>%
-  width(j = "SE", width = 0.65) %>%
-  width(j = "95% CI", width = 1.35) %>%
-  width(j = "z", width = 0.65) %>%
-  width(j = "p", width = 0.65) %>%
+
+# ------------------------------------------------------------
+# Longitude contrasts
+# ------------------------------------------------------------
+
+table_1_lon <- standardize_emm(
+  comparative_primary$longitude_age_differences,
+  "Longitude",
+  "Immature – Adult"
+) %>%
+  transmute(
+    Species,
+    Longitude_difference = paste0(
+      fmt_est(Estimate),
+      " (",
+      fmt_est(CI_low),
+      ", ",
+      fmt_est(CI_high),
+      ")"
+    ),
+    Longitude_P = fmt_p_manuscript(p)
+  )
+
+
+# ------------------------------------------------------------
+# Combine latitude and longitude contrasts
+# ------------------------------------------------------------
+
+table_1 <- table_1_lat %>%
+  left_join(
+    table_1_lon,
+    by = "Species"
+  ) %>%
+  mutate(
+    Species = factor(
+      Species,
+      levels = focal_display_order
+    )
+  ) %>%
+  arrange(
+    Species
+  ) %>%
+  mutate(
+    Species = as.character(Species)
+  )
+
+
+# ------------------------------------------------------------
+# Format Table 1
+# ------------------------------------------------------------
+
+ft_table_1 <- flextable(
+  table_1
+) %>%
+  
+  set_header_labels(
+    Species = "Species",
+    Latitude_difference = "Difference (95% CI)",
+    Latitude_P = "P",
+    Longitude_difference = "Difference (95% CI)",
+    Longitude_P = "P"
+  ) %>%
+  
+  add_header_row(
+    values = c(
+      "",
+      "Latitude",
+      "Longitude"
+    ),
+    colwidths = c(
+      1,
+      2,
+      2
+    )
+  ) %>%
+  
+  align(
+    align = "left",
+    part = "all"
+  ) %>%
+  
+  valign(
+    valign = "center",
+    part = "all"
+  ) %>%
+  
+  bold(
+    part = "header"
+  ) %>%
+  
+  italic(
+    i = 2,
+    j = c(
+      "Latitude_P",
+      "Longitude_P"
+    ),
+    part = "header"
+  ) %>%
+  
+  border_remove() %>%
+  
+  fontsize(
+    size = 11,
+    part = "all"
+  ) %>%
+  
+  set_table_properties(
+    layout = "fixed"
+  ) %>%
+  
+  width(
+    j = "Species",
+    width = 1.35
+  ) %>%
+  
+  width(
+    j = c(
+      "Latitude_difference",
+      "Longitude_difference"
+    ),
+    width = 1.65
+  ) %>%
+  
+  width(
+    j = c(
+      "Latitude_P",
+      "Longitude_P"
+    ),
+    width = 0.85
+  ) %>%
+  
   set_caption(
     caption = paste0(
-      "Table 1. Within-species differences between immature and adult ",
-      "geographic sex-ratio slopes in the primary comparative model. ",
-      "Estimates represent the immature–adult difference in change in ",
-      "log-odds of a record being female per 5° geographic change. ",
-      "Positive estimates indicate a more positive geographic slope ",
-      "among immatures than adults."
+      "Table 1. Within-species immature–adult differences in geographic ",
+      "sex-ratio slopes. Estimates are immature minus adult slope ",
+      "differences per 5° increase in latitude or longitude; positive ",
+      "values indicate more positive slopes among immatures."
     )
   )
 
-table_1_doc <- read_docx()
 
-table_1_doc <- body_end_section_landscape(
-  table_1_doc
-)
+# ------------------------------------------------------------
+# Export Table 1
+# ------------------------------------------------------------
+
+table_1_doc <- read_docx()
 
 table_1_doc <- body_add_flextable(
   table_1_doc,
@@ -1599,7 +1741,6 @@ print(
   table_1_doc,
   target = "Table1.docx"
 )
-
 
 # ============================================================
 # SAVE FIGURES AS PNG AND VECTOR PDF
