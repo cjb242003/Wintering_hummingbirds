@@ -1,6 +1,7 @@
 # ============================================================
 # 03_sensitivity_analysis.R
-# Run the sensitivity analyses, model diagnostics, and nonlinear spatial GAMMs.
+# Run the sensitivity analyses, model diagnostics, and nonlinear spatial GAMMs
+# reported in the manuscript and Supplementary Material.
 # Run 02_primary_analysis.R first.
 #
 # The GAMM section uses a saved results cache when a matching cache is present.
@@ -11,6 +12,9 @@
 
 library(data.table)
 library(dplyr)
+library(lme4)
+library(emmeans)
+library(DHARMa)
 library(mgcv)
 library(sf)
 
@@ -21,6 +25,7 @@ library(sf)
 
 required_primary_objects <- c(
   "results",
+  "comparative_primary",
   "comparative_df",
   "m_comparative_full",
   "focal_species",
@@ -55,11 +60,12 @@ if (length(missing_primary_objects) > 0L) {
   )
 }
 
-
 required_functions <- c(
   "in_month_day_window",
   "infer_season_year_fun",
   "classify_immature",
+  "prepare_comparative_data",
+  "fit_comparative_age_sex_model",
   "fit_temporal_comparative_robustness",
   "run_leave_one_station_out"
 )
@@ -80,15 +86,20 @@ if (length(missing_functions) > 0L) {
   )
 }
 
-
 required_comparative_cols <- c(
   "common_station_id",
   "species_site_id",
   "species_winter_year",
   "species_band_id",
   "band",
+  "lat_dd",
+  "lon_dd",
   "lat5",
-  "lon5"
+  "lon5",
+  "Female",
+  "Immature",
+  "Immature_f",
+  "winter_year"
 )
 
 missing_comparative_cols <- setdiff(
@@ -103,27 +114,316 @@ if (length(missing_comparative_cols) > 0L) {
   )
 }
 
+if (!requireNamespace("ape", quietly = TRUE)) {
+  stop(
+    "Package 'ape' is required for species-specific Moran's I diagnostics."
+  )
+}
+
 
 # ============================================================
-# 1. SENSITIVITY SETTINGS
+# 1. SENSITIVITY SETTINGS AND HELPERS
 # ============================================================
 
 station_leave_out_n <- 4L
+restricted_lon_min <- -97
+projection_epsg <- 5070L
 
-dharma_simulations <- 250L
+dharma_simulations <- 1000L
 diagnostics_seed <- 123L
 
 
+# Return the first available column name from a set of candidates.
+pick_col <- function(df, candidates, required = TRUE, label = NULL) {
+  hit <- intersect(candidates, names(df))
+  
+  if (length(hit) == 0L) {
+    if (required) {
+      stop(
+        "Could not find column ",
+        if (is.null(label)) paste(candidates, collapse = "/") else label,
+        "."
+      )
+    }
+    return(NULL)
+  }
+  
+  hit[1L]
+}
+
+
+# Standardize emmeans output used by sensitivity analyses.
+tidy_emm <- function(x) {
+  d <- as.data.frame(x)
+  
+  est_col <- pick_col(
+    d,
+    c(
+      "estimate",
+      "lat5.trend",
+      "lon5.trend",
+      "lat5_within.trend",
+      "lon5_within.trend"
+    ),
+    label = "estimate"
+  )
+  
+  lcl_col <- pick_col(
+    d,
+    c("asymp.LCL", "lower.CL", "LCL"),
+    label = "lower confidence limit"
+  )
+  
+  ucl_col <- pick_col(
+    d,
+    c("asymp.UCL", "upper.CL", "UCL"),
+    label = "upper confidence limit"
+  )
+  
+  stat_col <- pick_col(
+    d,
+    c("z.ratio", "t.ratio"),
+    required = FALSE
+  )
+  
+  out <- data.frame(
+    Estimate = as.numeric(d[[est_col]]),
+    SE = as.numeric(d[["SE"]]),
+    CI_low = as.numeric(d[[lcl_col]]),
+    CI_high = as.numeric(d[[ucl_col]]),
+    Statistic =
+      if (is.null(stat_col)) NA_real_ else as.numeric(d[[stat_col]]),
+    p = as.numeric(d[["p.value"]]),
+    stringsAsFactors = FALSE
+  )
+  
+  for (nm in intersect(c("contrast", "Species", "Immature_f"), names(d))) {
+    out[[nm]] <- as.character(d[[nm]])
+  }
+  
+  out
+}
+
+
+# Extract immature-adult geographic slope differences from a fitted model.
+age_slope_differences <- function(
+    model,
+    lat_var = "lat5",
+    lon_var = "lon5"
+) {
+  one_axis <- function(var_name, axis_label) {
+    em <- emmeans::emtrends(
+      model,
+      specs = ~ Immature_f | Species,
+      var = var_name
+    )
+    
+    d <- tidy_emm(
+      summary(
+        emmeans::contrast(
+          em,
+          method = "revpairwise"
+        ),
+        infer = c(TRUE, TRUE),
+        level = 0.95
+      )
+    )
+    
+    d$Axis <- axis_label
+    d
+  }
+  
+  dplyr::bind_rows(
+    one_axis(lat_var, "Latitude"),
+    one_axis(lon_var, "Longitude")
+  ) %>%
+    dplyr::select(
+      dplyr::any_of(
+        c(
+          "Axis",
+          "Species",
+          "contrast"
+        )
+      ),
+      Estimate,
+      SE,
+      CI_low,
+      CI_high,
+      Statistic,
+      p
+    )
+}
+
+
+# Extract chi-square, degrees of freedom, and raw probability value from an LRT.
+extract_lrt <- function(x, test_name) {
+  a <- as.data.frame(x)
+  last <- a[nrow(a), , drop = FALSE]
+  
+  chisq_col <- intersect(
+    c("Chisq", "ChiSq", "Chi_square"),
+    names(last)
+  )[1L]
+  
+  df_col <- intersect(
+    c("Df", "Chi Df", "df"),
+    names(last)
+  )[1L]
+  
+  p_col <- intersect(
+    c("Pr(>Chisq)", "p", "p.value"),
+    names(last)
+  )[1L]
+  
+  if (any(is.na(c(chisq_col, df_col, p_col)))) {
+    stop("Could not identify all required likelihood-ratio test columns.")
+  }
+  
+  data.frame(
+    Test = test_name,
+    Chi_square = as.numeric(last[[chisq_col]]),
+    df = as.numeric(last[[df_col]]),
+    p = as.numeric(last[[p_col]]),
+    stringsAsFactors = FALSE
+  )
+}
+
+
+# Retain the earliest record with known sex and classifiable age for each
+# species-individual-winter combination. If no complete record exists, retain
+# the earliest record so demographic uncertainty can be summarized.
+select_first_record_per_bird_winter <- function(d, complete_only = FALSE) {
+  d <- data.table::copy(d)
+  
+  data.table::setorder(
+    d,
+    Species,
+    band,
+    winter_year,
+    dt
+  )
+  
+  selected <- d[, {
+    known_both <- which(
+      !is.na(Female) &
+        !is.na(Immature)
+    )
+    
+    if (length(known_both) > 0L) {
+      .SD[known_both[1L]]
+    } else {
+      .SD[1L]
+    }
+  },
+  by = .(
+    Species,
+    band,
+    winter_year
+  )]
+  
+  if (isTRUE(complete_only)) {
+    selected <- selected[
+      !is.na(Female) &
+        !is.na(Immature)
+    ]
+  }
+  
+  selected
+}
+
+
+# Convert selected focal-species records into the comparative-data structure
+# used by the primary GLMM.
+records_to_comparative <- function(selected_records) {
+  selected_records <- as.data.frame(selected_records)
+  
+  sensitivity_results <- stats::setNames(
+    lapply(
+      focal_species,
+      function(sp) {
+        d <- selected_records[
+          selected_records$Species == sp,
+          ,
+          drop = FALSE
+        ]
+        
+        if (nrow(d) == 0L) {
+          stop(
+            "No qualifying records for ",
+            sp,
+            " in the sensitivity dataset."
+          )
+        }
+        
+        list(data_points = d)
+      }
+    ),
+    focal_species
+  )
+  
+  prepare_comparative_data(
+    results = sensitivity_results,
+    comparative_species = focal_species,
+    reference_species = "Rufous"
+  )
+}
+
+
+# Fit the primary comparative structure to an independently selected set of
+# focal-species records and return the quantities used in sensitivity tables.
+fit_rebuilt_sensitivity <- function(selected_records, label) {
+  d <- records_to_comparative(selected_records)
+  
+  fit <- fit_comparative_age_sex_model(
+    comparative_df = d,
+    optimizer = "bobyqa",
+    maxfun = 2e5,
+    run_lrt = TRUE,
+    pairwise_adjust = "tukey"
+  )
+  
+  lrt <- dplyr::bind_rows(
+    extract_lrt(
+      fit$lrt$overall,
+      "Species x age x geography"
+    ),
+    extract_lrt(
+      fit$lrt$latitude,
+      "Species x age x latitude"
+    ),
+    extract_lrt(
+      fit$lrt$longitude,
+      "Species x age x longitude"
+    )
+  )
+  
+  lrt$Analysis <- label
+  lrt$N <- nrow(d)
+  
+  differences <- age_slope_differences(
+    fit$model
+  )
+  differences$Analysis <- label
+  differences$N <- nrow(d)
+  
+  list(
+    data = d,
+    model = fit$model,
+    lrt = lrt,
+    differences = differences,
+    convergence = fit$convergence
+  )
+}
+
+
 # ============================================================
-# 2. PRIMARY-WINDOW UNCERTAINTY RECONSTRUCTION
-#
-# Reconstruct the primary-window selection while retaining records with
-# unknown sex or unclassifiable age. Within each species x band x winter, keep
-# the earliest complete record when available; otherwise keep the earliest
-# record. The complete-case focal subset is checked against the primary data.
+# 2. PRIMARY-WINDOW RECONSTRUCTION
 # ============================================================
 
-raw_primary <- fread(
+# Reconstruct the primary-window selection while retaining incomplete
+# demographic records for the uncertainty analysis and exact event dates for
+# the within-window sensitivity analysis.
+raw_primary <- data.table::fread(
   csv_file,
   select = c(
     "band",
@@ -136,7 +436,8 @@ raw_primary <- fread(
     "lon_dd",
     "sex_code",
     "age_code"
-  )
+  ),
+  showProgress = FALSE
 )
 
 raw_primary[, event_year := as.integer(event_year)]
@@ -162,31 +463,38 @@ raw_primary <- raw_primary[
     lon_dd >= lon_min &
     lon_dd <= lon_max &
     lat_dd >= lat_min &
-    lat_dd <= lat_max
+    lat_dd <= lat_max &
+    !is.na(band)
 ]
 
 raw_primary[, Species := names(species_ids)[
-  match(species_id, unname(species_ids))
+  match(
+    species_id,
+    unname(species_ids)
+  )
 ]]
 
-# Missing event days are used only for ordering after date-window filtering.
-raw_primary[is.na(event_day), event_day := 15L]
+# Preserve missing event days before assigning a value used only for ordering.
+raw_primary[, event_day_missing := is.na(event_day)]
+raw_primary[, event_day_filled := event_day]
+raw_primary[is.na(event_day_filled), event_day_filled := 15L]
 
-raw_primary[, dt := as.IDate(
+raw_primary[, dt := data.table::as.IDate(
   sprintf(
     "%04d-%02d-%02d",
     event_year,
     event_month,
-    event_day
+    event_day_filled
   )
 )]
 
 raw_primary <- raw_primary[
-  !is.na(dt) &
-    !is.na(band)
+  !is.na(dt)
 ]
 
-primary_year_fun <- infer_season_year_fun(months_keep)
+primary_year_fun <- infer_season_year_fun(
+  months_keep
+)
 
 raw_primary[, winter_year :=
               primary_year_fun(
@@ -194,10 +502,10 @@ raw_primary[, winter_year :=
                 event_month
               )]
 
-raw_primary[, Female := fifelse(
+raw_primary[, Female := data.table::fifelse(
   sex_code %in% c(5L, 7L),
   1L,
-  fifelse(
+  data.table::fifelse(
     sex_code %in% c(4L, 6L),
     0L,
     NA_integer_
@@ -210,48 +518,13 @@ raw_primary[, Immature :=
                 age_code
               )]
 
-setorder(
+selected_primary_all <- select_first_record_per_bird_winter(
   raw_primary,
-  Species,
-  band,
-  winter_year,
-  dt
+  complete_only = FALSE
 )
 
-selected_primary_all <- raw_primary[, {
-  known_both <- which(
-    !is.na(Female) &
-      !is.na(Immature)
-  )
-  
-  if (length(known_both) > 0L) {
-    .SD[known_both[1L]]
-  } else {
-    .SD[1L]
-  }
-},
-by = .(
-  Species,
-  band,
-  winter_year
-)]
-
-selected_primary_all <- selected_primary_all[, .(
-  Species = as.character(Species),
-  band = as.character(band),
-  winter_year = as.integer(winter_year),
-  event_month = as.integer(event_month),
-  age_code = as.integer(age_code),
-  sex_code = as.integer(sex_code),
-  lat_dd = as.numeric(lat_dd),
-  lon_dd = as.numeric(lon_dd),
-  Female = as.integer(Female),
-  Immature = as.integer(Immature)
-)]
-
-
-# Verify that independently reconstructed complete cases match the primary
-# focal-species datasets exactly.
+# Verify that the independently reconstructed complete focal-species records
+# exactly match the datasets used in the primary model.
 primary_reconstruction_matches <- vapply(
   focal_species,
   function(sp) {
@@ -260,13 +533,19 @@ primary_reconstruction_matches <- vapply(
         !is.na(Female) &
         !is.na(Immature)
     ][
-      order(band, winter_year)
+      order(
+        band,
+        winter_year
+      )
     ]
     
-    primary <- as.data.table(
+    primary <- data.table::as.data.table(
       results[[sp]]$data_points
     )[
-      order(band, winter_year)
+      order(
+        band,
+        winter_year
+      )
     ]
     
     if (nrow(recon) != nrow(primary)) {
@@ -276,20 +555,20 @@ primary_reconstruction_matches <- vapply(
     isTRUE(
       all.equal(
         recon[, .(
-          band,
-          winter_year,
-          lat_dd,
-          lon_dd,
-          Female,
-          Immature
+          band = as.character(band),
+          winter_year = as.integer(winter_year),
+          lat_dd = as.numeric(lat_dd),
+          lon_dd = as.numeric(lon_dd),
+          Female = as.integer(Female),
+          Immature = as.integer(Immature)
         )],
         primary[, .(
-          band,
-          winter_year,
-          lat_dd,
-          lon_dd,
-          Female,
-          Immature
+          band = as.character(band),
+          winter_year = as.integer(winter_year),
+          lat_dd = as.numeric(lat_dd),
+          lon_dd = as.numeric(lon_dd),
+          Female = as.integer(Female),
+          Immature = as.integer(Immature)
         )],
         tolerance = 1e-8,
         check.attributes = FALSE
@@ -308,12 +587,11 @@ if (!all(primary_reconstruction_matches)) {
 
 
 # ============================================================
-# 3. MISSINGNESS AND EXTREME-ALLOCATION BOUNDS
-#
-# Calculate extreme-allocation bounds for age composition and age-specific
-# sex ratios among records with missing or unclassifiable demographic data.
+# 3. DEMOGRAPHIC UNCERTAINTY
 # ============================================================
 
+# Calculate extreme-allocation bounds for age composition and age-specific
+# sex ratios among records with missing or unclassifiable demographic data.
 safe_prop <- function(num, den) {
   if (den > 0L) num / den else NA_real_
 }
@@ -328,7 +606,7 @@ calc_species_uncertainty <- function(sp) {
   n_unknown_sex <- sum(is.na(x$Female))
   n_unclassifiable_age <- sum(is.na(x$Immature))
   
-  missingness_summary <- data.table(
+  missingness_summary <- data.table::data.table(
     Species = sp,
     Total_selected_bird_years = n_selected,
     Unknown_or_missing_sex_N = n_unknown_sex,
@@ -347,13 +625,12 @@ calc_species_uncertainty <- function(sp) {
       }
   )
   
-  # Overall age-composition bounds.
   n_immature <- sum(x$Immature == 1L, na.rm = TRUE)
   n_adult <- sum(x$Immature == 0L, na.rm = TRUE)
   n_age_unknown <- sum(is.na(x$Immature))
   n_total <- n_immature + n_adult + n_age_unknown
   
-  age_bounds <- data.table(
+  age_bounds <- data.table::data.table(
     Group = "All",
     Immature_known = n_immature,
     Adult_known = n_adult,
@@ -376,10 +653,7 @@ calc_species_uncertainty <- function(sp) {
       )
   )
   
-  # Joint age + sex uncertainty cells:
-  # AF/AM = adult female/male; IF/IM = immature female/male;
-  # AU/IU = known age, unknown sex; UF/UM = unknown age, known female/male;
-  # UU = unknown age and unknown sex.
+  # Joint age-sex uncertainty cells.
   AF <- nrow(x[Immature == 0L & Female == 1L])
   AM <- nrow(x[Immature == 0L & Female == 0L])
   IF <- nrow(x[Immature == 1L & Female == 1L])
@@ -390,7 +664,7 @@ calc_species_uncertainty <- function(sp) {
   UM <- nrow(x[is.na(Immature) & Female == 0L])
   UU <- nrow(x[is.na(Immature) & is.na(Female)])
   
-  sex_ratio_bounds <- data.table(
+  sex_ratio_bounds <- data.table::data.table(
     Age = c(
       "Adult",
       "Immature"
@@ -417,7 +691,7 @@ calc_species_uncertainty <- function(sp) {
 }
 
 
-sensitivity_results <- setNames(
+sensitivity_results <- stats::setNames(
   lapply(
     names(species_ids),
     calc_species_uncertainty
@@ -425,7 +699,7 @@ sensitivity_results <- setNames(
   names(species_ids)
 )
 
-missingness_summary_all <- rbindlist(
+missingness_summary_all <- data.table::rbindlist(
   lapply(
     sensitivity_results,
     function(x) x$missingness_summary
@@ -437,12 +711,11 @@ missingness_summary_all <- rbindlist(
 
 # ============================================================
 # 4. JANUARY AGE-CLASSIFICATION LOSS
-#
-# Apply the focal-species filters and one-record-per-individual selection to
-# January records and summarize the resulting age-classification loss.
 # ============================================================
 
-raw_january <- fread(
+# Apply the focal-species filters and one-record-per-individual selection to
+# January records and summarize the resulting age-classification loss.
+raw_january <- data.table::fread(
   csv_file,
   select = c(
     "band",
@@ -455,7 +728,8 @@ raw_january <- fread(
     "lon_dd",
     "sex_code",
     "age_code"
-  )
+  ),
+  showProgress = FALSE
 )
 
 raw_january[, event_year := as.integer(event_year)]
@@ -476,13 +750,16 @@ raw_january <- raw_january[
 ]
 
 raw_january[, Species := names(species_ids)[
-  match(species_id, unname(species_ids))
+  match(
+    species_id,
+    unname(species_ids)
+  )
 ]]
 
-raw_january[, Female := fifelse(
+raw_january[, Female := data.table::fifelse(
   sex_code %in% c(5L, 7L),
   1L,
-  fifelse(
+  data.table::fifelse(
     sex_code %in% c(4L, 6L),
     0L,
     NA_integer_
@@ -496,14 +773,15 @@ raw_january[, Immature :=
               )]
 
 # Missing event days are used only for ordering within January.
-raw_january[is.na(event_day), event_day := 15L]
+raw_january[, event_day_filled := event_day]
+raw_january[is.na(event_day_filled), event_day_filled := 15L]
 
-raw_january[, dt := as.IDate(
+raw_january[, dt := data.table::as.IDate(
   sprintf(
     "%04d-%02d-%02d",
     event_year,
     event_month,
-    event_day
+    event_day_filled
   )
 )]
 
@@ -511,7 +789,7 @@ raw_january <- raw_january[
   !is.na(dt)
 ]
 
-setorder(
+data.table::setorder(
   raw_january,
   Species,
   band,
@@ -541,20 +819,16 @@ january_classification_loss_overall <- selected_january[
   ,
   .(
     N = .N,
-    Unclassifiable_age_N =
-      sum(
-        is.na(Immature)
-      ),
+    Unclassifiable_age_N = sum(
+      is.na(Immature)
+    ),
     Unclassifiable_age_pct =
-      100 *
-      mean(
+      100 * mean(
         is.na(Immature)
       )
   )
 ]
 
-# Summarize the age codes among January records that cannot be assigned to an
-# analysis age class.
 january_unclassifiable_age_codes <- selected_january[
   is.na(Immature),
   .N,
@@ -572,11 +846,10 @@ january_unclassifiable_age_codes <- selected_january[
 
 # ============================================================
 # 5. TEMPORAL-CONFOUNDING ROBUSTNESS
-#
-# Fit the temporal-confounding robustness model using geography centered
-# within species x winter year and standardized year terms.
 # ============================================================
 
+# Center geography within species and winter year and include standardized
+# year terms to assess temporal confounding of geographic sex-ratio patterns.
 comparative_temporal <- fit_temporal_comparative_robustness(
   comparative_df = comparative_df,
   optimizer = "bobyqa",
@@ -585,14 +858,35 @@ comparative_temporal <- fit_temporal_comparative_robustness(
   pairwise_adjust = "tukey"
 )
 
+# Quantify the geographic variance retained after within-year centering.
+within_year_variance <- comparative_df %>%
+  dplyr::group_by(
+    Species,
+    winter_year
+  ) %>%
+  dplyr::mutate(
+    lat_centered = lat_dd - mean(lat_dd, na.rm = TRUE),
+    lon_centered = lon_dd - mean(lon_dd, na.rm = TRUE)
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(Species) %>%
+  dplyr::summarise(
+    Latitude_variance_retained_pct =
+      100 * stats::var(lat_centered, na.rm = TRUE) /
+      stats::var(lat_dd, na.rm = TRUE),
+    Longitude_variance_retained_pct =
+      100 * stats::var(lon_centered, na.rm = TRUE) /
+      stats::var(lon_dd, na.rm = TRUE),
+    .groups = "drop"
+  )
+
 
 # ============================================================
-# 6. LEAVE-ONE-HIGH-VOLUME-LOCATION-OUT INFLUENCE ANALYSIS
-#
-# Identify the four highest-volume reported coordinate locations and refit
-# the primary model after omitting each location separately.
+# 6. LEAVE-ONE-HIGH-VOLUME-LOCATION-OUT SENSITIVITY
 # ============================================================
 
+# Identify the four highest-volume reported locations and refit the primary
+# model after omitting each location separately.
 station_influence <- run_leave_one_station_out(
   comparative_df = comparative_df,
   top_n = station_leave_out_n,
@@ -612,109 +906,386 @@ station_influence_lrt_table <-
 station_influence_age_differences <-
   station_influence$age_difference_summary
 
-station_influence_species_contrasts <-
-  station_influence$species_contrast_summary
 
 
 # ============================================================
-# 7. PRIMARY MODEL DIAGNOSTICS
-#
-# Summarize convergence, singularity, dispersion, residual uniformity, and
-# outlier diagnostics for the primary comparative GLMM.
+# 7. WITHIN-WINDOW DATE SENSITIVITY
 # ============================================================
 
-run_comparative_primary_diagnostics <- function(
-    model,
-    n_sim = 250L,
-    seed = 123L
-) {
-  conv_message <- model@optinfo$conv$lme4$messages
-  optimizer_code <- model@optinfo$conv$opt
-  
-  max_abs_gradient <-
-    if (!is.null(model@optinfo$derivs$gradient)) {
-      max(abs(model@optinfo$derivs$gradient))
-    } else {
-      NA_real_
-    }
-  
-  singular <- lme4::isSingular(
-    model,
-    tol = 1e-4
+# Reconstruct the primary focal-species dataset with exact event dates retained.
+primary_focal_records <- selected_primary_all[
+  Species %in% focal_species &
+    !is.na(Female) &
+    !is.na(Immature)
+]
+
+primary_focal_with_dates <- records_to_comparative(
+  primary_focal_records
+)
+
+# Confirm that adding event-date fields preserves the primary dataset.
+primary_date_keys <- primary_focal_with_dates %>%
+  dplyr::transmute(
+    Species = as.character(Species),
+    band = as.character(band),
+    winter_year = as.integer(winter_year),
+    lat_dd = as.numeric(lat_dd),
+    lon_dd = as.numeric(lon_dd),
+    Female = as.integer(Female),
+    Immature = as.integer(Immature)
+  ) %>%
+  dplyr::arrange(
+    Species,
+    band,
+    winter_year
   )
-  
-  set.seed(seed)
-  
-  sim <- DHARMa::simulateResiduals(
-    fittedModel = model,
-    n = n_sim,
-    plot = FALSE
+
+primary_model_keys <- comparative_df %>%
+  dplyr::transmute(
+    Species = as.character(Species),
+    band = as.character(band),
+    winter_year = as.integer(winter_year),
+    lat_dd = as.numeric(lat_dd),
+    lon_dd = as.numeric(lon_dd),
+    Female = as.integer(Female),
+    Immature = as.integer(Immature)
+  ) %>%
+  dplyr::arrange(
+    Species,
+    band,
+    winter_year
   )
-  
-  dispersion_res <- DHARMa::testDispersion(
-    sim,
-    plot = FALSE
+
+if (!isTRUE(
+  all.equal(
+    primary_date_keys,
+    primary_model_keys,
+    tolerance = 1e-8,
+    check.attributes = FALSE
   )
-  
-  uniformity_res <- DHARMa::testUniformity(
-    sim,
-    plot = FALSE
-  )
-  
-  outlier_res <- DHARMa::testOutliers(
-    sim,
-    plot = FALSE
-  )
-  
-  list(
-    global = data.table(
-      Convergence_message =
-        if (is.null(conv_message)) {
-          NA_character_
-        } else {
-          paste(
-            conv_message,
-            collapse = " | "
-          )
-        },
-      Optimizer_code =
-        as.integer(
-          optimizer_code
-        ),
-      Max_abs_gradient =
-        as.numeric(
-          max_abs_gradient
-        ),
-      Singular =
-        singular,
-      DHARMa_dispersion =
-        as.numeric(
-          dispersion_res$statistic
-        ),
-      DHARMa_dispersion_p =
-        dispersion_res$p.value,
-      DHARMa_uniformity_KS =
-        as.numeric(
-          uniformity_res$statistic
-        ),
-      DHARMa_uniformity_p =
-        uniformity_res$p.value,
-      DHARMa_outlier_p =
-        outlier_res$p.value
-    )
+)) {
+  stop(
+    "The date-augmented primary dataset does not match the primary comparative dataset."
   )
 }
 
+# Records without an exact event day are excluded only from this analysis.
+date_covariate_df <- primary_focal_with_dates %>%
+  dplyr::filter(
+    !event_day_missing
+  ) %>%
+  droplevels()
 
-comparative_primary_diagnostics <- run_comparative_primary_diagnostics(
-  model = m_comparative_full,
-  n_sim = dharma_simulations,
-  seed = diagnostics_seed
+window_start <- as.Date(
+  sprintf(
+    "%04d-%02d-%02d",
+    2000L,
+    primary_start_month,
+    primary_start_day
+  )
+)
+
+date_covariate_df$day_in_window <- as.integer(
+  as.Date(
+    sprintf(
+      "%04d-%02d-%02d",
+      2000L,
+      date_covariate_df$event_month,
+      date_covariate_df$event_day
+    )
+  ) - window_start
+)
+
+date_covariate_df$day_win_sc <- as.numeric(
+  scale(
+    date_covariate_df$day_in_window
+  )
+)
+
+# Allow the within-window relationship with sex ratio to differ among species
+# and age classes while retaining the primary geographic fixed effects and
+# random-effect structure.
+date_covariate_model <- lme4::glmer(
+  Female ~
+    Species * Immature_f * lat5 +
+    Species * Immature_f * lon5 +
+    Species * Immature_f * day_win_sc +
+    (1 | species_site_id) +
+    (1 | species_winter_year) +
+    (1 | species_band_id),
+  data = date_covariate_df,
+  family = binomial,
+  nAGQ = 1,
+  control = lme4::glmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(
+      maxfun = 2e5
+    )
+  )
+)
+
+date_covariate_lrt <- dplyr::bind_rows(
+  extract_lrt(
+    anova(
+      update(
+        date_covariate_model,
+        . ~ .
+        - Species:Immature_f:lat5
+        - Species:Immature_f:lon5
+      ),
+      date_covariate_model,
+      test = "Chisq"
+    ),
+    "Species x age x geography"
+  ),
+  extract_lrt(
+    anova(
+      update(
+        date_covariate_model,
+        . ~ . - Species:Immature_f:lat5
+      ),
+      date_covariate_model,
+      test = "Chisq"
+    ),
+    "Species x age x latitude"
+  ),
+  extract_lrt(
+    anova(
+      update(
+        date_covariate_model,
+        . ~ . - Species:Immature_f:lon5
+      ),
+      date_covariate_model,
+      test = "Chisq"
+    ),
+    "Species x age x longitude"
+  )
+)
+
+date_covariate_lrt$Analysis <- "Day-of-window covariate"
+date_covariate_lrt$N <- nrow(date_covariate_df)
+
+date_covariate_differences <- age_slope_differences(
+  date_covariate_model
+)
+date_covariate_differences$Analysis <- "Day-of-window covariate"
+date_covariate_differences$N <- nrow(date_covariate_df)
+
+
+# ============================================================
+# 8. WESTERN-BOUNDARY SENSITIVITY
+# ============================================================
+
+# Apply the 97-degree W boundary before selecting the first qualifying record
+# for each bird-winter so later records within the restricted region remain
+# eligible for inclusion.
+longitude_boundary_records <- select_first_record_per_bird_winter(
+  raw_primary[
+    Species %in% focal_species &
+      lon_dd >= restricted_lon_min
+  ],
+  complete_only = TRUE
+)
+
+longitude_boundary <- fit_rebuilt_sensitivity(
+  longitude_boundary_records,
+  "East of 97 W"
+)
+
+longitude_boundary_lrt <-
+  longitude_boundary$lrt
+
+longitude_boundary_differences <-
+  longitude_boundary$differences
+
+
+# ============================================================
+# 9. PRIMARY MODEL DIAGNOSTICS
+# ============================================================
+
+# Generate simulation-based residuals from the primary comparative GLMM.
+sim_primary <- DHARMa::simulateResiduals(
+  fittedModel = m_comparative_full,
+  n = dharma_simulations,
+  seed = diagnostics_seed,
+  plot = FALSE
+)
+
+uniformity_test <- DHARMa::testUniformity(
+  sim_primary,
+  plot = FALSE
+)
+
+outlier_test <- DHARMa::testOutliers(
+  sim_primary,
+  plot = FALSE
+)
+
+dharma_observation_level <- data.frame(
+  Uniformity_KS = as.numeric(uniformity_test$statistic),
+  Uniformity_p = uniformity_test$p.value,
+  Outlier_p = outlier_test$p.value,
+  stringsAsFactors = FALSE
+)
+
+# Project coordinates for residual spatial-autocorrelation diagnostics.
+comparative_xy <- comparative_df %>%
+  sf::st_as_sf(
+    coords = c(
+      "lon_dd",
+      "lat_dd"
+    ),
+    crs = 4326,
+    remove = FALSE
+  ) %>%
+  sf::st_transform(
+    projection_epsg
+  ) %>%
+  sf::st_coordinates()
+
+spatial_df <- data.frame(
+  x_km = comparative_xy[, 1] / 1000,
+  y_km = comparative_xy[, 2] / 1000
+)
+
+# Aggregate residuals across species to one value per reported location.
+location_group <- factor(
+  as.character(
+    comparative_df$common_station_id
+  )
+)
+
+sim_location <- DHARMa::recalculateResiduals(
+  sim_primary,
+  group = location_group
+)
+
+location_coords <- stats::aggregate(
+  spatial_df,
+  by = list(
+    group = location_group
+  ),
+  FUN = mean
+)
+
+if (nrow(location_coords) != length(sim_location$scaledResiduals)) {
+  stop(
+    "Aggregated residuals and coordinates have different lengths."
+  )
+}
+
+if (any(duplicated(location_coords[, c("x_km", "y_km")]))) {
+  stop(
+    "Duplicate coordinates remain after aggregation to reported location."
+  )
+}
+
+spatial_test_pooled <- DHARMa::testSpatialAutocorrelation(
+  sim_location,
+  x = location_coords$x_km,
+  y = location_coords$y_km,
+  plot = FALSE
+)
+
+dharma_location_level <- data.frame(
+  N_locations = nrow(location_coords),
+  Morans_I = as.numeric(
+    spatial_test_pooled$statistic["observed"]
+  ),
+  Morans_I_expected = as.numeric(
+    spatial_test_pooled$statistic["expected"]
+  ),
+  Morans_I_sd = as.numeric(
+    spatial_test_pooled$statistic["sd"]
+  ),
+  Morans_I_p = spatial_test_pooled$p.value,
+  stringsAsFactors = FALSE
+)
+
+# Aggregate residuals separately for each species and reported location.
+species_site_group <- factor(
+  as.character(
+    comparative_df$species_site_id
+  )
+)
+
+sim_species_site <- DHARMa::recalculateResiduals(
+  sim_primary,
+  group = species_site_group
+)
+
+species_site_coords <- stats::aggregate(
+  spatial_df,
+  by = list(
+    group = species_site_group
+  ),
+  FUN = mean
+)
+
+species_site_coords$Species <- sub(
+  "__.*$",
+  "",
+  as.character(
+    species_site_coords$group
+  )
+)
+
+if (nrow(species_site_coords) != length(sim_species_site$scaledResiduals)) {
+  stop(
+    "Species-by-location residuals and coordinates are misaligned."
+  )
+}
+
+species_site_coords$residual <-
+  sim_species_site$scaledResiduals
+
+spatial_test_by_species <- dplyr::bind_rows(
+  lapply(
+    focal_species,
+    function(sp) {
+      d <- species_site_coords[
+        species_site_coords$Species == sp,
+      ]
+      
+      distances <- as.matrix(
+        stats::dist(
+          d[, c("x_km", "y_km")]
+        )
+      )
+      
+      weights <- 1 / distances
+      diag(weights) <- 0
+      weights[!is.finite(weights)] <- 0
+      
+      mi <- ape::Moran.I(
+        d$residual,
+        weight = weights,
+        scaled = FALSE
+      )
+      
+      data.frame(
+        Species = sp,
+        N_locations = nrow(d),
+        Morans_I = mi$observed,
+        Morans_I_expected = mi$expected,
+        Morans_I_sd = mi$sd,
+        Morans_I_p = mi$p.value,
+        stringsAsFactors = FALSE
+      )
+    }
+  )
+)
+
+comparative_primary_diagnostics <- list(
+  convergence = comparative_primary$convergence,
+  observation_level = dharma_observation_level,
+  location_level = dharma_location_level,
+  spatial_by_species = spatial_test_by_species
 )
 
 
 # ============================================================
-# 8. NONLINEAR SPATIAL GAMM SENSITIVITY
+# 10. NONLINEAR SPATIAL GAMM SENSITIVITY
 # ============================================================
 
 # GAMM settings and cache file.
@@ -1001,7 +1572,7 @@ if (!force_recompute_gamms && file.exists(gamm_results_cache_file)) {
   
   
   # ----------------------------------------------------------
-  # Extract model metadata for Supplementary Table S10
+  # Extract model metadata for Supplementary Material Table S7
   # ----------------------------------------------------------
   
   gamm_model_metadata <- bind_rows(
@@ -1080,3 +1651,4 @@ if (!force_recompute_gamms && file.exists(gamm_results_cache_file)) {
     "`force_recompute_gamms <- TRUE`."
   )
 }
+
