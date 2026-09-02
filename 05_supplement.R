@@ -1,26 +1,25 @@
 # ============================================================
 # 05_supplement.R
-# Generate Supplementary Tables S1-S13 from objects created by the
-# primary and sensitivity analyses. Run 02_primary_analysis.R and
-# 03_sensitivity_analysis.R before this script. Cached GAMM results are
-# formatted here but are not refit.
+#
+# Generate Supplementary Material Tables S1-S10 for the hummingbird
+# demographic and geographic analyses. Run 01_functions.R,
+# 02_primary_analysis.R, and 03_sensitivity_analysis.R before this script.
 #
 # Supplementary tables:
 #   S1  Demographic composition
-#   S2  Primary comparative GLMM fixed effects
-#   S3  Primary comparative GLMM random effects
-#   S4  Primary age-specific geographic slopes
+#   S2  Supporting-species demographic uncertainty
+#   S3  Primary age-specific geographic slopes
+#   S4  Geographic sampling support by latitude band
 #   S5  Primary pairwise interspecific contrasts
-#   S6  Temporal-confounding omnibus tests
-#   S7  Temporal-confounding slopes and contrasts
-#   S8  Leave-one-high-volume-location-out sensitivity
-#   S9  GAMM nonlinear-spatial sensitivity
-#   S10 Extreme-allocation demographic bounds
-#   S11 Missing demographic information
-#   S12 Primary comparative model diagnostics
-#   S13 Geographic sampling support by latitude band
+#   S6  Primary comparative GLMM fixed and random effects
+#   S7  GAMM nonlinear-spatial sensitivity
+#   S8  Temporal-confounding robustness analysis
+#   S9  Leave-one-high-volume-location-out sensitivity
+#   S10 Sampling-date and western-boundary robustness analyses
+#
+# Objects named table_s#, caption_s#, and ft_s# correspond directly to the
+# final Supplementary Material table number used in the manuscript.
 # ============================================================
-
 
 library(dplyr)
 library(tidyr)
@@ -43,10 +42,13 @@ required_objects <- c(
   "station_influence_top_sites",
   "station_influence_lrt_table",
   "station_influence_age_differences",
-  "station_influence_species_contrasts",
   "sensitivity_results",
   "missingness_summary_all",
-  "comparative_primary_diagnostics"
+  "within_year_variance",
+  "date_covariate_lrt",
+  "date_covariate_differences",
+  "longitude_boundary_lrt",
+  "longitude_boundary_differences"
 )
 
 missing_objects <- required_objects[
@@ -90,10 +92,12 @@ descriptive_species <- c(
   "Allen's"
 )
 
-lat_band_width <- 2
+lat_band_width <- 4
+lat_band_origin <- 22
 
 gamm_results_cache_file <-
   "gamm_results_PRIMARY_NOV15_DEC31_EPSG5070.rds"
+
 
 
 # ------------------------------------------------------------
@@ -164,7 +168,7 @@ if (!isTRUE(
 )) {
   stop(
     "The GAMM cache was created with settings that do not match the ",
-    "published GAMM specification."
+    "GAMM specification used in the analysis."
   )
 }
 
@@ -233,9 +237,10 @@ if (!identical(
 )) {
   stop(
     "The GAMM results cache does not match the current primary ",
-    "comparative dataset. Do not generate Table S9 from this cache."
+    "comparative dataset. Recreate the GAMM cache before generating the supplement."
   )
 }
+
 
 # ============================================================
 # 2. FORMATTING HELPERS
@@ -248,42 +253,180 @@ fmt_p <- function(x) {
     ifelse(
       x < 0.001,
       "<0.001",
-      sprintf("%.3f", x)
+      ifelse(
+        x < 0.01,
+        sprintf("%.3f", x),
+        sprintf("%.2f", x)
+      )
     )
   )
 }
 
 
-fmt_num <- function(x, digits = 3) {
-  ifelse(
-    is.na(x),
+# Numerical precision follows the final manuscript throughout the supplement:
+#   - model estimates, SEs, confidence limits, z statistics, variances, and SDs: 2 decimals
+#   - chi-square statistics and reference df: 1 decimal
+#   - EDF and k-index: 2 decimals
+#   - tabulated percentages: 1 decimal
+#   - P values: 2 decimals unless raw P < 0.01, then 3 decimals; P < 0.001 as the floor
+# A true minus sign is used for negative displayed values.
+fmt_num <- function(x, digits = 2) {
+  # Prevent display artifacts such as −0.00 after rounding.
+  threshold <- 0.5 * 10^(-digits)
+  x_clean <- ifelse(!is.na(x) & abs(x) < threshold, 0, x)
+  out <- ifelse(
+    is.na(x_clean),
     "",
-    sprintf(paste0("%.", digits, "f"), x)
+    sprintf(paste0("%.", digits, "f"), x_clean)
+  )
+  sub("^-", "−", out)
+}
+
+
+fmt_ci <- function(lower, upper, digits = 2) {
+  paste0(
+    fmt_num(lower, digits),
+    " to ",
+    fmt_num(upper, digits)
   )
 }
 
 
-nice_ft <- function(x, font_size = 9) {
-  flextable(x) %>%
-    theme_booktabs() %>%
-    fontsize(size = font_size, part = "all") %>%
-    bold(part = "header") %>%
-    align(align = "center", part = "header") %>%
-    valign(valign = "center", part = "all") %>%
-    autofit()
+fmt_count <- function(x) {
+  ifelse(
+    is.na(x),
+    "",
+    format(
+      as.integer(x),
+      big.mark = ",",
+      scientific = FALSE,
+      trim = TRUE
+    )
+  )
 }
 
 
-# Common formatting for supplementary-table captions.
+fmt_model_rank <- function(x) {
+  vapply(
+    strsplit(as.character(x), "/", fixed = TRUE),
+    function(parts) {
+      if (length(parts) != 2L || !all(grepl("^[0-9]+$", parts))) {
+        return(paste(parts, collapse = "/"))
+      }
+      paste(fmt_count(as.integer(parts)), collapse = "/")
+    },
+    character(1)
+  )
+}
+
+
+nice_ft <- function(x) {
+  font_size <- 12
+  
+  ft <- flextable(x) %>%
+    border_remove() %>%
+    font(
+      fontname = "Times New Roman",
+      part = "all"
+    ) %>%
+    fontsize(
+      size = font_size,
+      part = "all"
+    ) %>%
+    bold(
+      part = "header"
+    ) %>%
+    align(
+      align = "left",
+      part = "all"
+    ) %>%
+    valign(
+      valign = "top",
+      part = "all"
+    ) %>%
+    line_spacing(
+      space = 1,
+      part = "all"
+    ) %>%
+    padding(
+      padding = 1,
+      part = "all"
+    ) %>%
+    set_table_properties(
+      layout = "autofit",
+      width = 1,
+      align = "left",
+      opts_word = list(
+        split = FALSE,
+        keep_with_next = FALSE,
+        repeat_headers = TRUE
+      )
+    )
+  
+  # AOS uses italic statistical symbols. Keep column keys unchanged for the
+  # data workflow but display the appropriate symbols in the header.
+  if ("p" %in% names(x)) {
+    ft <- compose(
+      ft,
+      j = "p",
+      part = "header",
+      value = as_paragraph(as_i("P"))
+    )
+  }
+  
+  if ("z" %in% names(x)) {
+    ft <- compose(
+      ft,
+      j = "z",
+      part = "header",
+      value = as_paragraph(as_i("z"))
+    )
+  }
+  
+  if ("n" %in% names(x)) {
+    ft <- compose(
+      ft,
+      j = "n",
+      part = "header",
+      value = as_paragraph(as_i("n"))
+    )
+  }
+  
+  ft
+}
+
+
+# Set common typography, single spacing, and alignment for all supplementary tables.
+flextable::set_flextable_defaults(
+  font.family = "Times New Roman",
+  hansi.family = "Times New Roman",
+  cs.family = "Times New Roman",
+  eastasia.family = "Times New Roman",
+  font.size = 12,
+  text.align = "left",
+  padding = 1,
+  line_spacing = 1,
+  table.layout = "autofit"
+)
+
+
+# Format table captions and panel headings.
 caption_text_fp <- fp_text(
   font.family = "Times New Roman",
-  font.size = 10,
+  font.size = 12,
+  bold = TRUE,
+  italic = FALSE
+)
+
+caption_stat_text_fp <- fp_text(
+  font.family = "Times New Roman",
+  font.size = 12,
   bold = TRUE,
   italic = TRUE
 )
 
 caption_fp <- fp_par(
-  text.align = "center",
+  text.align = "left",
   padding.top = 0,
   padding.bottom = 0,
   line_spacing = 1,
@@ -358,7 +501,7 @@ extract_lrt <- function(x, test_name, axis) {
   tibble(
     Test = test_name,
     Axis = axis,
-    `Chi-square` = as.numeric(a$Chisq[i]),
+    `χ²` = as.numeric(a$Chisq[i]),
     df = as.integer(a$Df[i]),
     p = as.numeric(a[["Pr(>Chisq)"]][i])
   )
@@ -426,7 +569,7 @@ format_location <- function(latitude, longitude) {
 # TABLE S1. Demographic composition
 # ============================================================
 
-table_s1 <- map_dfr(
+table_s1_demographic_composition <- map_dfr(
   retained_species,
   function(sp) {
     d <- results[[sp]]$data_points
@@ -445,125 +588,172 @@ table_s1 <- map_dfr(
     )
     
     tibble(
-      Species = sp,
-      N = n_total,
+      Species = ifelse(sp == "Allen's", "Allen’s", sp),
+      n = fmt_count(n_total),
       `Immature, n (%)` =
         sprintf(
-          "%d (%.1f)",
-          n_immature,
+          "%s (%.1f)",
+          fmt_count(n_immature),
           100 * n_immature / n_total
         ),
       `Female overall, n (%)` =
         sprintf(
-          "%d (%.1f)",
-          n_female,
+          "%s (%.1f)",
+          fmt_count(n_female),
           100 * n_female / n_total
         ),
       `Adult female, n (%)` =
         sprintf(
-          "%d (%.1f)",
-          n_adult_female,
+          "%s (%.1f)",
+          fmt_count(n_adult_female),
           100 * n_adult_female / n_adult
         ),
       `Immature female, n (%)` =
         sprintf(
-          "%d (%.1f)",
-          n_immature_female,
+          "%s (%.1f)",
+          fmt_count(n_immature_female),
           100 * n_immature_female / n_immature
         )
     )
   }
 )
 
-caption_s1 <- paste0(
-  "Table S1. Demographic composition of hummingbird records ",
-  "within the 15 November–31 December primary sampling window ",
-  "for the six species retained in the study. Only records with ",
-  "classifiable age and known sex are included. Immature and overall ",
-  "female percentages are calculated among all included records; ",
-  "adult and immature female percentages are calculated within ",
-  "the corresponding age class."
+caption_s1_demographic_composition <- paste0(
+  "Supplementary Material Table S1. Demographic composition of hummingbird records ",
+  "for the six study species. Only records with classifiable age and known sex are included. ",
+  "Female percentages are shown overall and within age classes."
 )
 
-ft_s1 <- nice_ft(table_s1)
+ft_s1_demographic_composition <- nice_ft(table_s1_demographic_composition)
 
 
 # ============================================================
-# TABLE S2. Primary comparative GLMM fixed effects
+# TABLE S2. Supporting-species demographic uncertainty
 # ============================================================
 
-table_s2 <- broom.mixed::tidy(
-  m_comparative_full,
-  effects = "fixed",
-  conf.int = TRUE,
-  conf.method = "Wald"
+supporting_species_age_bounds <- map_dfr(
+  descriptive_species,
+  function(sp) {
+    as.data.frame(
+      sensitivity_results[[sp]]$age_bounds
+    ) %>%
+      filter(Group == "All") %>%
+      mutate(Species = sp)
+  }
+)
+
+supporting_species_sex_bounds <- map_dfr(
+  descriptive_species,
+  function(sp) {
+    as.data.frame(
+      sensitivity_results[[sp]]$sex_ratio_bounds
+    ) %>%
+      mutate(Species = sp)
+  }
+)
+
+supporting_species_missingness <- as.data.frame(
+  missingness_summary_all
 ) %>%
+  filter(
+    Species %in% descriptive_species
+  ) %>%
   transmute(
-    Term = clean_fixed_term(term),
-    Estimate = round(estimate, 3),
-    SE = round(std.error, 3),
-    `95% CI` = sprintf("%.3f to %.3f", conf.low, conf.high),
-    z = round(statistic, 3),
-    p = fmt_p(p.value)
+    Species = as.character(Species),
+    `Selected bird-years` = fmt_count(Total_selected_bird_years),
+    `Unknown sex, n (%)` =
+      sprintf(
+        "%s (%.1f)",
+        fmt_count(Unknown_or_missing_sex_N),
+        Unknown_or_missing_sex_pct
+      ),
+    `Unclassifiable age, n (%)` =
+      sprintf(
+        "%s (%.1f)",
+        fmt_count(Unclassifiable_age_N),
+        Unclassifiable_age_pct
+      )
   )
 
-caption_s2 <- paste0(
-  "Table S2. Fixed-effect coefficients from the primary comparative ",
-  "generalized linear mixed model of hummingbird sex ratio. Rufous ",
-  "Hummingbird and adults are the reference levels. Latitude and ",
-  "longitude are expressed per 5° geographic change and centered ",
-  "at 31°N and 90°W."
-)
-
-ft_s2 <- nice_ft(table_s2)
-
-
-# ============================================================
-# TABLE S3. Primary comparative GLMM random effects
-# ============================================================
-
-random_effect_levels <- c(
-  species_site_id =
-    dplyr::n_distinct(comparative_df$species_site_id),
-  species_winter_year =
-    dplyr::n_distinct(comparative_df$species_winter_year),
-  species_band_id =
-    dplyr::n_distinct(comparative_df$species_band_id)
-)
-
-table_s3 <- as.data.frame(
-  lme4::VarCorr(m_comparative_full)
-) %>%
-  filter(is.na(var2)) %>%
+supporting_species_age_bounds_compact <- supporting_species_age_bounds %>%
   transmute(
-    `Random effect` = dplyr::recode(
-      grp,
-      "species_site_id" = "Species × reported location",
-      "species_winter_year" = "Species × year",
-      "species_band_id" = "Species × band identity",
-      .default = grp
-    ),
-    Levels = as.integer(random_effect_levels[grp]),
-    Variance = round(vcov, 3),
-    SD = round(sdcor, 3)
+    Species = as.character(Species),
+    `Immature, observed (range %)` =
+      sprintf(
+        "%.1f (%.1f–%.1f)",
+        100 * Observed_immature_prop,
+        100 * Minimum_immature_prop,
+        100 * Maximum_immature_prop
+      )
   )
 
-caption_s3 <- paste0(
-  "Table S3. Random-effect variance components from the primary ",
-  "comparative generalized linear mixed model. Random intercepts ",
-  "were included for species × reported location, species × year, ",
-  "and species × band identity. Variance components are reported ",
-  "on the logit scale."
+supporting_species_sex_bounds_compact <- supporting_species_sex_bounds %>%
+  mutate(
+    Age = as.character(Age),
+    Sex_bound = sprintf(
+      "%.1f (%.1f–%.1f)",
+      100 * Observed_female_prop,
+      100 * Minimum_female_prop,
+      100 * Maximum_female_prop
+    )
+  ) %>%
+  select(
+    Species,
+    Age,
+    Sex_bound
+  ) %>%
+  pivot_wider(
+    names_from = Age,
+    values_from = Sex_bound,
+    names_glue = "{Age} female, observed (range %)"
+  )
+
+required_sex_bound_cols <- c(
+  "Adult female, observed (range %)",
+  "Immature female, observed (range %)"
 )
 
-ft_s3 <- nice_ft(table_s3)
+stopifnot(
+  all(required_sex_bound_cols %in% names(supporting_species_sex_bounds_compact))
+)
+
+table_s2_supporting_species_uncertainty <- supporting_species_missingness %>%
+  left_join(
+    supporting_species_age_bounds_compact,
+    by = "Species"
+  ) %>%
+  left_join(
+    supporting_species_sex_bounds_compact,
+    by = "Species"
+  ) %>%
+  mutate(
+    Species = factor(
+      Species,
+      levels = descriptive_species
+    )
+  ) %>%
+  arrange(Species) %>%
+  mutate(
+    Species = as.character(Species),
+    Species = ifelse(Species == "Allen's", "Allen’s", Species)
+  )
+
+stopifnot(nrow(table_s2_supporting_species_uncertainty) == length(descriptive_species))
+
+caption_s2_supporting_species_uncertainty <- paste0(
+  "Supplementary Material Table S2. Missing demographic information and extreme-allocation ",
+  "bounds for Calliope, Broad-tailed, and Allen’s Hummingbirds. Ranges show the minimum and ",
+  "maximum percentages under extreme allocation of records with unclassifiable age or unknown sex."
+)
+
+ft_s2_supporting_species_uncertainty <- nice_ft(table_s2_supporting_species_uncertainty)
 
 
 # ============================================================
-# TABLE S4. Primary age-specific geographic slopes
+# TABLE S3. Primary age-specific geographic slopes
 # ============================================================
 
-table_s4 <- bind_rows(
+table_s3_age_specific_slopes <- bind_rows(
   standardize_emm(
     comparative_primary$latitude_slopes,
     "Latitude",
@@ -579,590 +769,24 @@ table_s4 <- bind_rows(
     Axis,
     Species,
     Age,
-    Estimate = round(Estimate, 3),
-    SE = round(SE, 3),
-    `95% CI` = sprintf("%.3f to %.3f", CI_low, CI_high),
-    z = round(z, 3),
+    Estimate = fmt_num(Estimate, 2),
+    SE = fmt_num(SE, 2),
+    `95% CI` = fmt_ci(CI_low, CI_high, 2),
+    z = fmt_num(z, 2),
     p = fmt_p(p)
   )
 
-caption_s4 <- paste0(
-  "Table S4. Age-specific latitude and longitude slopes estimated ",
-  "from the primary comparative model. Estimates represent change ",
-  "in log-odds of a record being female per 5° geographic change."
+caption_s3_age_specific_slopes <- paste0(
+  "Supplementary Material Table S3. Age-specific latitude and longitude slopes from the ",
+  "primary comparative model. Estimates are changes in log-odds of a record being female ",
+  "per 5° geographic change."
 )
 
-ft_s4 <- nice_ft(table_s4)
+ft_s3_age_specific_slopes <- nice_ft(table_s3_age_specific_slopes)
 
 
 # ============================================================
-# TABLE S5. Primary pairwise interspecific contrasts
-# ============================================================
-
-table_s5 <- bind_rows(
-  standardize_emm(
-    comparative_primary$latitude_species_contrasts,
-    "Latitude",
-    "Species contrast"
-  ),
-  standardize_emm(
-    comparative_primary$longitude_species_contrasts,
-    "Longitude",
-    "Species contrast"
-  )
-) %>%
-  transmute(
-    Axis,
-    Contrast = clean_species_contrast(Contrast),
-    Estimate = round(Estimate, 3),
-    SE = round(SE, 3),
-    `95% CI` = sprintf("%.3f to %.3f", CI_low, CI_high),
-    z = round(z, 3),
-    p = fmt_p(p)
-  )
-
-caption_s5 <- paste0(
-  "Table S5. Tukey-adjusted pairwise interspecific comparisons ",
-  "of age-dependent latitude and longitude slopes from the primary ",
-  "comparative model. Estimates represent the immature–adult slope ",
-  "difference in the first species minus that in the second species."
-)
-
-ft_s5 <- nice_ft(table_s5)
-
-
-# ============================================================
-# TABLE S6. Temporal-confounding omnibus tests
-# ============================================================
-
-table_s6 <- bind_rows(
-  extract_lrt(
-    comparative_temporal$lrt$overall,
-    "Species × Age × Geography",
-    "Joint"
-  ),
-  extract_lrt(
-    comparative_temporal$lrt$latitude,
-    "Species × Age × Latitude",
-    "Latitude"
-  ),
-  extract_lrt(
-    comparative_temporal$lrt$longitude,
-    "Species × Age × Longitude",
-    "Longitude"
-  )
-) %>%
-  transmute(
-    Test,
-    Axis,
-    `Chi-square` = round(`Chi-square`, 3),
-    df,
-    p = fmt_p(p)
-  )
-
-caption_s6 <- paste0(
-  "Table S6. Likelihood-ratio tests from the temporal-confounding ",
-  "robustness analysis. Geographic coordinates were centered within ",
-  "species and year, and species-, age-, and year-dependent temporal ",
-  "terms were included as nuisance effects so geographic gradients ",
-  "were estimated primarily from within-year spatial variation."
-)
-
-ft_s6 <- nice_ft(table_s6)
-
-
-# ============================================================
-# TABLE S7. Temporal-confounding slopes and contrasts
-# ============================================================
-
-table_s7 <- bind_rows(
-  standardize_emm(
-    comparative_temporal$latitude_slopes,
-    "Latitude",
-    "Age-specific slope"
-  ),
-  standardize_emm(
-    comparative_temporal$longitude_slopes,
-    "Longitude",
-    "Age-specific slope"
-  ),
-  standardize_emm(
-    comparative_temporal$latitude_age_differences,
-    "Latitude",
-    "Immature – Adult"
-  ),
-  standardize_emm(
-    comparative_temporal$longitude_age_differences,
-    "Longitude",
-    "Immature – Adult"
-  ),
-  standardize_emm(
-    comparative_temporal$latitude_species_contrasts,
-    "Latitude",
-    "Species contrast"
-  ),
-  standardize_emm(
-    comparative_temporal$longitude_species_contrasts,
-    "Longitude",
-    "Species contrast"
-  )
-) %>%
-  mutate(
-    Contrast = ifelse(
-      Result == "Species contrast",
-      clean_species_contrast(Contrast),
-      Contrast
-    ),
-    Contrast = gsub(
-      " - ",
-      " – ",
-      Contrast,
-      fixed = TRUE
-    )
-  ) %>%
-  transmute(
-    Result,
-    Axis,
-    Species,
-    Age,
-    Contrast,
-    Estimate = round(Estimate, 3),
-    SE = round(SE, 3),
-    `95% CI` = sprintf("%.3f to %.3f", CI_low, CI_high),
-    z = round(z, 3),
-    p = fmt_p(p)
-  )
-
-caption_s7 <- paste0(
-  "Table S7. Age-specific geographic slopes, within-species ",
-  "immature–adult slope differences, and pairwise interspecific ",
-  "contrasts from the temporal-confounding robustness analysis. ",
-  "Pairwise interspecific p-values are Tukey-adjusted; age-specific ",
-  "slopes and prespecified within-species contrasts are not ",
-  "multiplicity-adjusted."
-)
-
-ft_s7 <- nice_ft(
-  table_s7,
-  font_size = 8
-)
-
-
-# ============================================================
-# TABLE S8. Leave-one-high-volume-location-out sensitivity
-# ============================================================
-
-location_lookup <- as.data.frame(
-  station_influence_top_sites
-) %>%
-  transmute(
-    Omitted_station = as.character(Station),
-    `Omitted location` =
-      format_location(
-        Mean_latitude,
-        Mean_longitude
-      ),
-    `N omitted` = as.integer(N),
-    `% primary omitted` = Percent_of_primary
-  )
-
-
-loo_lrt <- as.data.frame(
-  station_influence_lrt_table
-) %>%
-  mutate(
-    Omitted_station = as.character(Omitted_station),
-    Axis = case_when(
-      grepl("geography", Test, ignore.case = TRUE) ~ "Joint",
-      grepl("latitude", Test, ignore.case = TRUE) ~ "Latitude",
-      grepl("longitude", Test, ignore.case = TRUE) ~ "Longitude",
-      TRUE ~ ""
-    )
-  ) %>%
-  transmute(
-    Omitted_station,
-    Result = "Omnibus LRT",
-    Axis,
-    Detail = gsub(
-      " x ",
-      " × ",
-      Test,
-      fixed = TRUE
-    ),
-    Estimate = NA_real_,
-    SE = NA_real_,
-    CI_low = NA_real_,
-    CI_high = NA_real_,
-    Statistic = Chi_square,
-    df = as.numeric(df),
-    p
-  )
-
-
-loo_age_raw <- as.data.frame(
-  station_influence_age_differences
-)
-
-loo_age_ci <- get_ci_cols(
-  loo_age_raw
-)
-
-loo_age <- loo_age_raw %>%
-  transmute(
-    Omitted_station = as.character(Omitted_station),
-    Result = "Within-species age difference",
-    Axis,
-    Detail = paste0(Species, ": Immature – Adult"),
-    Estimate = estimate,
-    SE,
-    CI_low = .data[[loo_age_ci[1]]],
-    CI_high = .data[[loo_age_ci[2]]],
-    Statistic = z.ratio,
-    df = NA_real_,
-    p = p.value
-  )
-
-
-loo_species_raw <- as.data.frame(
-  station_influence_species_contrasts
-)
-
-loo_species_ci <- get_ci_cols(
-  loo_species_raw
-)
-
-loo_species <- loo_species_raw %>%
-  transmute(
-    Omitted_station = as.character(Omitted_station),
-    Result = "Species contrast",
-    Axis,
-    Detail = clean_species_contrast(contrast),
-    Estimate = estimate,
-    SE,
-    CI_low = .data[[loo_species_ci[1]]],
-    CI_high = .data[[loo_species_ci[2]]],
-    Statistic = z.ratio,
-    df = NA_real_,
-    p = p.value
-  )
-
-
-table_s8 <- bind_rows(
-  loo_lrt,
-  loo_age,
-  loo_species
-) %>%
-  left_join(
-    location_lookup,
-    by = "Omitted_station"
-  ) %>%
-  select(
-    `Omitted location`,
-    `N omitted`,
-    `% primary omitted`,
-    Result,
-    Axis,
-    Detail,
-    Estimate,
-    SE,
-    CI_low,
-    CI_high,
-    Statistic,
-    df,
-    p
-  ) %>%
-  mutate(
-    `% primary omitted` =
-      round(`% primary omitted`, 2),
-    Estimate = fmt_num(Estimate, 3),
-    SE = fmt_num(SE, 3),
-    `95% CI` = ifelse(
-      is.na(CI_low) | is.na(CI_high),
-      "",
-      sprintf("%.3f to %.3f", CI_low, CI_high)
-    ),
-    Statistic = fmt_num(Statistic, 3),
-    df = ifelse(
-      is.na(df),
-      "",
-      as.character(as.integer(df))
-    ),
-    p = fmt_p(p)
-  ) %>%
-  select(-CI_low, -CI_high)
-
-caption_s8 <- paste0(
-  "Table S8. Leave-one-high-volume-reported-location-out sensitivity ",
-  "analysis. The four reported coordinate locations contributing the ",
-  "largest numbers of complete-case records to the primary comparative ",
-  "dataset were omitted one at a time, and the primary comparative ",
-  "model was refit without modification. Omnibus rows report likelihood-",
-  "ratio tests; within-species rows report immature–adult slope differences; ",
-  "and species-contrast rows report Tukey-adjusted pairwise comparisons ",
-  "of age-dependent slopes."
-)
-
-ft_s8 <- nice_ft(
-  table_s8,
-  font_size = 7.5
-)
-
-
-# ============================================================
-# TABLE S9. GAMM nonlinear-spatial sensitivity
-# ============================================================
-
-table_s9_raw <- gamm_sensitivity_summary %>%
-  left_join(
-    gamm_kcheck_summary,
-    by = c("Species", "Term")
-  ) %>%
-  left_join(
-    gamm_model_metadata %>%
-      select(
-        Species,
-        N,
-        Model_rank
-      ),
-    by = "Species"
-  )
-# Confirm complete GAMM, basis-dimension, and model-metadata output.
-stopifnot(
-  nrow(table_s9_raw) == 6L,
-  !anyNA(
-    table_s9_raw[
-      c(
-        "Species",
-        "Term",
-        "Smooth",
-        "edf",
-        "Ref_df",
-        "Chi_square",
-        "p",
-        "k_index",
-        "k_p",
-        "N",
-        "Model_rank"
-      )
-    ]
-  )
-)
-
-table_s9 <- table_s9_raw %>%
-  transmute(
-    Species,
-    N,
-    Smooth = dplyr::recode(
-      Smooth,
-      "Immature - Adult spatial difference" =
-        "Immature – Adult spatial difference",
-      .default = Smooth
-    ),
-    edf = round(edf, 3),
-    `Reference df` = round(Ref_df, 3),
-    `Chi-square` = round(Chi_square, 3),
-    p = fmt_p(p),
-    `k-index` = ifelse(
-      is.na(k_index),
-      "",
-      sprintf("%.2f", k_index)
-    ),
-    `k-check p` = fmt_p(k_p),
-    `Model rank` = Model_rank
-  )
-
-# Confirm the expected GAMM table structure.
-stopifnot(
-  nrow(table_s9) == 6L,
-  !anyNA(table_s9$Species)
-)
-
-caption_s9 <- paste0(
-  "Table S9. Species-specific generalized additive mixed-model ",
-  "(GAMM) sensitivity analysis allowing nonlinear two-dimensional ",
-  "geographic sex-ratio surfaces. Spatial smooths were fitted using ",
-  "EPSG:5070 projected coordinates scaled to 100-km units. The adult ",
-  "spatial surface is the baseline smooth, whereas the Immature – Adult ",
-  "spatial difference tests whether the geographic surface differs ",
-  "between age classes. Models included random-effect smooths for ",
-  "reported location, year, and band identity. k-index values and ",
-  "associated p-values are from basis-dimension checks calculated once ",
-  "in the GAMM sensitivity analysis and stored for reuse."
-)
-
-ft_s9 <- nice_ft(
-  table_s9,
-  font_size = 8
-)
-
-
-# ============================================================
-# TABLE S10. Extreme-allocation demographic bounds
-# ============================================================
-
-age_bounds_table <- map_dfr(
-  descriptive_species,
-  function(sp) {
-    as.data.frame(
-      sensitivity_results[[sp]]$age_bounds
-    ) %>%
-      filter(Group == "All") %>%
-      mutate(Species = sp)
-  }
-)
-
-sex_bounds_table <- map_dfr(
-  descriptive_species,
-  function(sp) {
-    as.data.frame(
-      sensitivity_results[[sp]]$sex_ratio_bounds
-    ) %>%
-      mutate(Species = sp)
-  }
-)
-
-table_s10 <- sex_bounds_table %>%
-  select(
-    Species,
-    Age,
-    Observed_female_prop,
-    Minimum_female_prop,
-    Maximum_female_prop
-  ) %>%
-  left_join(
-    age_bounds_table %>%
-      select(
-        Species,
-        Observed_immature_prop,
-        Minimum_immature_prop,
-        Maximum_immature_prop
-      ),
-    by = "Species"
-  ) %>%
-  transmute(
-    Species,
-    Age,
-    `Observed female (%)` =
-      round(100 * Observed_female_prop, 1),
-    `Minimum female (%)` =
-      round(100 * Minimum_female_prop, 1),
-    `Maximum female (%)` =
-      round(100 * Maximum_female_prop, 1),
-    `Observed immature (%)` =
-      round(100 * Observed_immature_prop, 1),
-    `Minimum immature (%)` =
-      round(100 * Minimum_immature_prop, 1),
-    `Maximum immature (%)` =
-      round(100 * Maximum_immature_prop, 1)
-  )
-
-caption_s10 <- paste0(
-  "Table S10. Extreme-allocation bounds for age and sex composition ",
-  "of Calliope, Broad-tailed, and Allen’s Hummingbirds. Age-composition ",
-  "bounds assign all records with unclassifiable age to adults or ",
-  "immatures in turn. Age-specific sex-ratio bounds jointly account ",
-  "for unclassifiable age and unknown or missing sex by assigning ",
-  "uncertain records to the combinations producing the minimum and ",
-  "maximum possible female proportions."
-)
-
-ft_s10 <- nice_ft(table_s10)
-
-
-# ============================================================
-# TABLE S11. Missing demographic information
-# ============================================================
-
-table_s11 <- as.data.frame(
-  missingness_summary_all
-) %>%
-  filter(
-    Species %in% retained_species
-  ) %>%
-  mutate(
-    Species = factor(
-      Species,
-      levels = retained_species
-    )
-  ) %>%
-  arrange(Species) %>%
-  transmute(
-    Species = as.character(Species),
-    `Selected bird-years` = Total_selected_bird_years,
-    `Unknown sex N` = Unknown_or_missing_sex_N,
-    `Unknown sex (%)` =
-      round(Unknown_or_missing_sex_pct, 1),
-    `Unclassifiable age N` = Unclassifiable_age_N,
-    `Unclassifiable age (%)` =
-      round(Unclassifiable_age_pct, 1)
-  )
-
-caption_s11 <- paste0(
-  "Table S11. Missing sex and unclassifiable-age information among ",
-  "the six hummingbird species retained in the study within the ",
-  "15 November–31 December primary sampling window. Counts are based ",
-  "on the one-record-per-individual-per-year selection used for the ",
-  "descriptive uncertainty analysis."
-)
-
-ft_s11 <- nice_ft(table_s11)
-
-
-# ============================================================
-# TABLE S12. Primary comparative model diagnostics
-# ============================================================
-
-diag_global <- as.data.frame(
-  comparative_primary_diagnostics$global
-)
-
-table_s12 <- tibble(
-  Diagnostic = c(
-    "Convergence warning",
-    "Optimizer code",
-    "Maximum absolute gradient",
-    "Singular model",
-    "DHARMa dispersion",
-    "DHARMa residual uniformity KS",
-    "DHARMa outlier test"
-  ),
-  Statistic = c(
-    ifelse(
-      is.na(diag_global$Convergence_message[1]) |
-        diag_global$Convergence_message[1] == "",
-      "None",
-      as.character(diag_global$Convergence_message[1])
-    ),
-    as.character(diag_global$Optimizer_code[1]),
-    sprintf("%.6f", diag_global$Max_abs_gradient[1]),
-    as.character(diag_global$Singular[1]),
-    sprintf("%.3f", diag_global$DHARMa_dispersion[1]),
-    sprintf("%.3f", diag_global$DHARMa_uniformity_KS[1]),
-    ""
-  ),
-  p = c(
-    "",
-    "",
-    "",
-    "",
-    fmt_p(diag_global$DHARMa_dispersion_p[1]),
-    fmt_p(diag_global$DHARMa_uniformity_p[1]),
-    fmt_p(diag_global$DHARMa_outlier_p[1])
-  )
-)
-
-caption_s12 <- paste0(
-  "Table S12. Diagnostic evaluation of the primary comparative ",
-  "generalized linear mixed model. Rows summarize convergence, ",
-  "singularity, and simulation-based DHARMa diagnostics for ",
-  "dispersion, residual uniformity, and outliers."
-)
-
-ft_s12 <- nice_ft(table_s12)
-
-
-# ============================================================
-# TABLE S13. Geographic sampling support by latitude band
+# TABLE S4. Geographic sampling support by 4° latitude band
 # ============================================================
 
 required_support_cols <- c(
@@ -1180,12 +804,14 @@ stopifnot(
   !anyNA(comparative_df$species_site_id)
 )
 
+# Use 4° latitude bands with 34°N as a band boundary.
 latitude_support_data <- comparative_df %>%
   mutate(
     Species = as.character(Species),
     Age = as.character(Immature_f),
     Latitude_band_low =
-      floor(lat_dd / lat_band_width) * lat_band_width,
+      floor((lat_dd - lat_band_origin) / lat_band_width) *
+      lat_band_width + lat_band_origin,
     Latitude_band = paste0(
       Latitude_band_low,
       "–<",
@@ -1194,7 +820,7 @@ latitude_support_data <- comparative_df %>%
     )
   )
 
-all_band_lows <- seq(
+latitude_band_lower_bounds <- seq(
   min(latitude_support_data$Latitude_band_low),
   max(latitude_support_data$Latitude_band_low),
   by = lat_band_width
@@ -1216,7 +842,7 @@ latitude_support_long <- latitude_support_data %>%
   complete(
     Species = focal_species_order,
     Age = c("Adult", "Immature"),
-    Latitude_band_low = all_band_lows,
+    Latitude_band_low = latitude_band_lower_bounds,
     fill = list(
       Records = 0L,
       Reported_locations = 0L
@@ -1244,7 +870,7 @@ latitude_support_long <- latitude_support_data %>%
     Age
   )
 
-table_s13 <- latitude_support_long %>%
+table_s4_geographic_sampling_support <- latitude_support_long %>%
   select(
     Species,
     Latitude_band_low,
@@ -1265,12 +891,12 @@ table_s13 <- latitude_support_long %>%
     Species = as.character(Species),
     Latitude_band_low,
     `Latitude band` = Latitude_band,
-    `Adult records` = Adult_Records,
+    `Adult records` = fmt_count(Adult_Records),
     `Adult reported locations` =
-      Adult_Reported_locations,
-    `Immature records` = Immature_Records,
+      fmt_count(Adult_Reported_locations),
+    `Immature records` = fmt_count(Immature_Records),
     `Immature reported locations` =
-      Immature_Reported_locations
+      fmt_count(Immature_Reported_locations)
   ) %>%
   arrange(
     factor(
@@ -1280,8 +906,8 @@ table_s13 <- latitude_support_long %>%
     Latitude_band_low
   )
 
-# Confirm that latitude-band counts reproduce the primary-model sample size.
-n_from_bands <- latitude_support_long %>%
+# Verify that latitude-band counts reproduce the primary-model sample size.
+sampling_support_counts_from_bands <- latitude_support_long %>%
   group_by(Species, Age) %>%
   summarise(
     N = sum(Records),
@@ -1293,7 +919,7 @@ n_from_bands <- latitude_support_long %>%
   ) %>%
   arrange(Species, Age)
 
-n_direct <- comparative_df %>%
+sampling_support_counts_direct <- comparative_df %>%
   transmute(
     Species = as.character(Species),
     Age = as.character(Immature_f)
@@ -1308,8 +934,8 @@ n_direct <- comparative_df %>%
 stopifnot(
   isTRUE(
     all.equal(
-      n_from_bands,
-      n_direct,
+      sampling_support_counts_from_bands,
+      sampling_support_counts_direct,
       check.attributes = FALSE
     )
   ),
@@ -1317,175 +943,1182 @@ stopifnot(
     nrow(comparative_df)
 )
 
-table_s13 <- table_s13 %>%
+table_s4_geographic_sampling_support <- table_s4_geographic_sampling_support %>%
   select(-Latitude_band_low)
 
-caption_s13 <- paste0(
-  "Table S13. Geographic sampling support for adult and immature ",
-  "Rufous, Black-chinned, and Ruby-throated Hummingbirds in the ",
-  "primary comparative analysis. Records are grouped into 2° latitude ",
-  "bands. Reported locations are unique species-specific combinations ",
-  "of identical reported latitude and longitude. Because coordinate ",
-  "precision varies among banding records, reported locations do not ",
-  "necessarily correspond to individual physical banding sites."
+caption_s4_geographic_sampling_support <- paste0(
+  "Supplementary Material Table S4. Geographic sampling support for adult and immature ",
+  "Rufous, Black-chinned, and Ruby-throated Hummingbirds by 4° latitude band."
 )
 
-ft_s13 <- nice_ft(
-  table_s13,
-  font_size = 8
-)
+ft_s4_geographic_sampling_support <- nice_ft(table_s4_geographic_sampling_support)
 
 
 # ============================================================
-# 3. WRITE SUPPLEMENTARY TABLES TO WORD
-#
-# The complete supplement is written in landscape orientation.
-# Each table begins on a new page, and every caption is inserted as a
-# standard Word paragraph immediately before its table. This provides
-# consistent caption formatting and stable pagination across tables.
+# TABLE S5. Primary pairwise interspecific contrasts
 # ============================================================
 
-supplement_tables <- list(
-  ft_s1,
-  ft_s2,
-  ft_s3,
-  ft_s4,
-  ft_s5,
-  ft_s6,
-  ft_s7,
-  ft_s8,
-  ft_s9,
-  ft_s10,
-  ft_s11,
-  ft_s12,
-  ft_s13
-)
-
-doc <- read_docx()
-
-doc_dims <- docx_dim(
-  doc
-)
-
-page_short <- min(
-  doc_dims$page
-)
-
-page_long <- max(
-  doc_dims$page
-)
-
-section_margins <- page_mar(
-  top = unname(doc_dims$margins["top"]),
-  bottom = unname(doc_dims$margins["bottom"]),
-  left = unname(doc_dims$margins["left"]),
-  right = unname(doc_dims$margins["right"]),
-  header = unname(doc_dims$margins["header"]),
-  footer = unname(doc_dims$margins["footer"])
-)
-
-# Define a single landscape section for the complete supplement.
-landscape_properties <- prop_section(
-  page_size = page_size(
-    width = page_short,
-    height = page_long,
-    orient = "landscape"
+table_s5_interspecific_contrasts <- bind_rows(
+  standardize_emm(
+    comparative_primary$latitude_species_contrasts,
+    "Latitude",
+    "Species contrast"
   ),
-  page_margins = section_margins,
-  type = "continuous"
+  standardize_emm(
+    comparative_primary$longitude_species_contrasts,
+    "Longitude",
+    "Species contrast"
+  )
+) %>%
+  transmute(
+    Axis,
+    Contrast = clean_species_contrast(Contrast),
+    Estimate = fmt_num(Estimate, 2),
+    SE = fmt_num(SE, 2),
+    `95% CI` = fmt_ci(CI_low, CI_high, 2),
+    z = fmt_num(z, 2),
+    p = fmt_p(p)
+  )
+
+caption_s5_interspecific_contrasts <- paste0(
+  "Supplementary Material Table S5. Tukey-adjusted pairwise comparisons of age-dependent ",
+  "latitude and longitude slopes among species. Estimates are the immature–adult slope ",
+  "difference in the first species minus that in the second species."
 )
 
-landscape_available_width <-
-  page_long -
-  unname(doc_dims$margins["left"]) -
-  unname(doc_dims$margins["right"]) -
-  0.10
+ft_s5_interspecific_contrasts <- nice_ft(table_s5_interspecific_contrasts)
 
-# Allow long tables to continue across pages and repeat column headers.
-supplement_tables <- lapply(
-  supplement_tables,
-  function(ft) {
-    set_table_properties(
-      ft,
-      opts_word = list(
-        split = TRUE,
-        keep_with_next = FALSE,
-        repeat_headers = TRUE
-      )
-    )
-  }
+
+# ============================================================
+# TABLE S6. Primary comparative GLMM fixed and random effects
+# ============================================================
+
+table_s6_fixed_effects <- broom.mixed::tidy(
+  m_comparative_full,
+  effects = "fixed",
+  conf.int = TRUE,
+  conf.method = "Wald"
+) %>%
+  transmute(
+    Term = clean_fixed_term(term),
+    Estimate = fmt_num(estimate, 2),
+    SE = fmt_num(std.error, 2),
+    `95% CI` = fmt_ci(conf.low, conf.high, 2),
+    z = fmt_num(statistic, 2),
+    p = fmt_p(p.value)
+  )
+
+primary_glmm_random_effect_levels <- c(
+  species_site_id =
+    dplyr::n_distinct(comparative_df$species_site_id),
+  species_winter_year =
+    dplyr::n_distinct(comparative_df$species_winter_year),
+  species_band_id =
+    dplyr::n_distinct(comparative_df$species_band_id)
 )
 
-# Scale the widest tables to the usable landscape-page width.
-wide_table_numbers <- c(
-  7L,   # temporal-confounding slopes and contrasts
-  8L,   # leave-one-location-out sensitivity
-  9L,   # GAMM sensitivity
-  13L   # geographic sampling support
+table_s6_random_effects <- as.data.frame(
+  lme4::VarCorr(m_comparative_full)
+) %>%
+  filter(is.na(var2)) %>%
+  transmute(
+    `Random effect` = dplyr::recode(
+      grp,
+      "species_site_id" = "Species × reported location",
+      "species_winter_year" = "Species × year",
+      "species_band_id" = "Species × band identity",
+      .default = grp
+    ),
+    Levels = fmt_count(primary_glmm_random_effect_levels[grp]),
+    Variance = fmt_num(vcov, 2),
+    SD = fmt_num(sdcor, 2)
+  )
+
+caption_s6_primary_glmm <- paste0(
+  "Supplementary Material Table S6. Fixed-effect coefficients and random-effect variance ",
+  "components from the primary comparative generalized linear mixed model. Rufous Hummingbird ",
+  "and adults are reference levels; latitude and longitude are scaled per 5° and centered at ",
+  "31°N and 90°W."
 )
 
-supplement_tables[wide_table_numbers] <- lapply(
-  supplement_tables[wide_table_numbers],
-  fit_to_width,
-  max_width = landscape_available_width
-)
+ft_s6_fixed_effects <- nice_ft(table_s6_fixed_effects)
+ft_s6_random_effects <- nice_ft(table_s6_random_effects)
 
-caption_numbers <- seq_along(
-  supplement_tables
-)
 
-captions <- list(
-  `1` = caption_s1,
-  `2` = caption_s2,
-  `3` = caption_s3,
-  `4` = caption_s4,
-  `5` = caption_s5,
-  `6` = caption_s6,
-  `7` = caption_s7,
-  `8` = caption_s8,
-  `9` = caption_s9,
-  `10` = caption_s10,
-  `11` = caption_s11,
-  `12` = caption_s12,
-  `13` = caption_s13
-)
+# ============================================================
+# TABLE S7. GAMM nonlinear-spatial sensitivity
+# ============================================================
 
-caption_paragraph_properties <- caption_fp
-
-for (i in seq_along(supplement_tables)) {
-  
-  # Table S1 begins on page 1; each subsequent table starts on a new page.
-  if (i > 1L) {
-    doc <- body_add_break(
-      doc
-    )
-  }
-  
-  # Add a consistently formatted caption immediately before the table.
-  doc <- body_add_fpar(
-    doc,
-    fpar(
-      ftext(
-        captions[[as.character(i)]],
-        prop = caption_text_fp
+table_s7_gamm_joined <- gamm_sensitivity_summary %>%
+  left_join(
+    gamm_kcheck_summary,
+    by = c("Species", "Term")
+  ) %>%
+  left_join(
+    gamm_model_metadata %>%
+      select(
+        Species,
+        N,
+        Model_rank
       ),
-      fp_p = caption_paragraph_properties
+    by = "Species"
+  )
+
+stopifnot(
+  nrow(table_s7_gamm_joined) == 6L,
+  !anyNA(
+    table_s7_gamm_joined[
+      c(
+        "Species",
+        "Term",
+        "Smooth",
+        "edf",
+        "Ref_df",
+        "Chi_square",
+        "p",
+        "k_index",
+        "k_p",
+        "N",
+        "Model_rank"
+      )
+    ]
+  )
+)
+
+table_s7_gamm_summary <- table_s7_gamm_joined %>%
+  transmute(
+    Species,
+    n = fmt_count(N),
+    Smooth = dplyr::recode(
+      Smooth,
+      "Immature - Adult spatial difference" =
+        "Immature–Adult spatial difference",
+      .default = Smooth
+    ),
+    EDF = fmt_num(edf, 2),
+    `Reference df` = fmt_num(Ref_df, 1),
+    `χ²` = fmt_num(Chi_square, 1),
+    p = fmt_p(p),
+    `k-index` = ifelse(
+      is.na(k_index),
+      "",
+      fmt_num(k_index, 2)
+    ),
+    `k-check p` = fmt_p(k_p),
+    `Model rank` = fmt_model_rank(Model_rank)
+  )
+
+stopifnot(
+  nrow(table_s7_gamm_summary) == 6L,
+  !anyNA(table_s7_gamm_summary$Species)
+)
+
+caption_s7_gamm_sensitivity <- paste0(
+  "Supplementary Material Table S7. Species-specific generalized additive mixed-model ",
+  "(GAMM) sensitivity analysis allowing nonlinear two-dimensional geographic sex-ratio surfaces. ",
+  "Adult spatial surfaces are the baseline; immature–adult difference smooths test whether ",
+  "geographic surfaces differ between age classes. k-index and k-check probability values assess ",
+  "basis dimension."
+)
+
+caption_s7_gamm_sensitivity_runs <- list(
+  ftext(
+    paste0(
+      "Supplementary Material Table S7. Species-specific generalized additive mixed-model ",
+      "(GAMM) sensitivity analysis allowing nonlinear two-dimensional geographic sex-ratio surfaces. ",
+      "Adult spatial surfaces are the baseline; immature–adult difference smooths test whether ",
+      "geographic surfaces differ between age classes. "
+    ),
+    prop = caption_text_fp
+  ),
+  ftext("k", prop = caption_stat_text_fp),
+  ftext("-index and ", prop = caption_text_fp),
+  ftext("k", prop = caption_stat_text_fp),
+  ftext("-check probability values assess basis dimension.", prop = caption_text_fp)
+)
+
+ft_s7_gamm_summary <- nice_ft(table_s7_gamm_summary)
+
+
+# ============================================================
+# TABLE S8. Temporal-confounding robustness analysis
+# ============================================================
+
+# Panel A: omnibus tests.
+table_s8_temporal_lrt <- bind_rows(
+  extract_lrt(
+    comparative_temporal$lrt$overall,
+    "Species × age × geography",
+    "Joint"
+  ),
+  extract_lrt(
+    comparative_temporal$lrt$latitude,
+    "Species × age × latitude",
+    "Latitude"
+  ),
+  extract_lrt(
+    comparative_temporal$lrt$longitude,
+    "Species × age × longitude",
+    "Longitude"
+  )
+) %>%
+  transmute(
+    Test,
+    `χ²` = fmt_num(`χ²`, 1),
+    df,
+    p = fmt_p(p)
+  )
+
+# Panel B: within-species age differences and longitude species contrasts.
+table_s8_temporal_effects <- bind_rows(
+  standardize_emm(
+    comparative_temporal$latitude_age_differences,
+    "Latitude",
+    "Immature – Adult"
+  ),
+  standardize_emm(
+    comparative_temporal$longitude_age_differences,
+    "Longitude",
+    "Immature – Adult"
+  ),
+  # Latitude species contrasts are omitted because the corresponding
+  # species × age × latitude interaction is unsupported.
+  standardize_emm(
+    comparative_temporal$longitude_species_contrasts,
+    "Longitude",
+    "Species contrast"
+  )
+) %>%
+  mutate(
+    Comparison = case_when(
+      Result == "Species contrast" ~ clean_species_contrast(Contrast),
+      Result == "Immature – Adult" ~ Species,
+      TRUE ~ Contrast
+    )
+  ) %>%
+  transmute(
+    Axis,
+    Comparison,
+    Estimate = fmt_num(Estimate, 2),
+    SE = fmt_num(SE, 2),
+    `95% CI` = fmt_ci(CI_low, CI_high, 2),
+    z = fmt_num(z, 2),
+    p = fmt_p(p)
+  )
+
+# Panel C: geographic variance retained after within-year centering.
+table_s8_temporal_variance <- as.data.frame(
+  within_year_variance
+) %>%
+  mutate(
+    Species = factor(
+      Species,
+      levels = focal_species_order
+    )
+  ) %>%
+  arrange(Species) %>%
+  transmute(
+    Species = as.character(Species),
+    `Latitude variance retained (%)` =
+      fmt_num(Latitude_variance_retained_pct, 1),
+    `Longitude variance retained (%)` =
+      fmt_num(Longitude_variance_retained_pct, 1)
+  )
+
+caption_s8_temporal_confounding <- paste0(
+  "Supplementary Material Table S8. Temporal-confounding robustness analysis using coordinates ",
+  "centered within species and year. Panel A shows omnibus likelihood-ratio tests; Panel B shows ",
+  "within-species immature–adult slope differences for single-species rows and Tukey-adjusted ",
+  "longitude contrasts for species-pair rows; Panel C shows geographic variance retained after ",
+  "centering. For species-pair rows, estimates are the immature–adult slope difference in the first ",
+  "species minus that in the second species. Within-species contrasts are not multiplicity-adjusted."
+)
+
+ft_s8_temporal_lrt <- nice_ft(table_s8_temporal_lrt)
+ft_s8_temporal_effects <- nice_ft(table_s8_temporal_effects)
+ft_s8_temporal_variance <- nice_ft(table_s8_temporal_variance)
+
+
+# ============================================================
+# TABLE S9. Leave-one-high-volume-location-out sensitivity
+# ============================================================
+
+leave_one_location_lookup <- as.data.frame(
+  station_influence_top_sites
+) %>%
+  transmute(
+    Omitted_station = as.character(Station),
+    `Omitted location` =
+      format_location(
+        Mean_latitude,
+        Mean_longitude
+      ),
+    `n omitted` = as.integer(N),
+    `% primary omitted` = fmt_num(Percent_of_primary, 1)
+  )
+
+# Omnibus tests for each omitted location.
+leave_one_location_lrt_compact <- as.data.frame(
+  station_influence_lrt_table
+) %>%
+  transmute(
+    Omitted_station = as.character(Omitted_station),
+    Test = case_when(
+      grepl("geography", Test, ignore.case = TRUE) ~ "Joint P",
+      grepl("latitude", Test, ignore.case = TRUE) ~ "Latitude P",
+      grepl("longitude", Test, ignore.case = TRUE) ~ "Longitude P",
+      TRUE ~ NA_character_
+    ),
+    p = fmt_p(p)
+  ) %>%
+  filter(!is.na(Test)) %>%
+  distinct(Omitted_station, Test, .keep_all = TRUE) %>%
+  pivot_wider(
+    names_from = Test,
+    values_from = p
+  )
+
+# Within-species age differences for each omitted location.
+leave_one_location_age_compact <- as.data.frame(
+  station_influence_age_differences
+) %>%
+  transmute(
+    Omitted_station = as.character(Omitted_station),
+    Species = as.character(Species),
+    Axis = as.character(Axis),
+    Result = paste0(
+      fmt_num(estimate, 2),
+      " (",
+      fmt_p(p.value),
+      ")"
+    )
+  ) %>%
+  filter(
+    Species %in% focal_species_order,
+    Axis %in% c("Latitude", "Longitude")
+  ) %>%
+  mutate(
+    Column = paste(Species, Axis, sep = "__")
+  ) %>%
+  select(
+    Omitted_station,
+    Column,
+    Result
+  ) %>%
+  distinct(Omitted_station, Column, .keep_all = TRUE) %>%
+  pivot_wider(
+    names_from = Column,
+    values_from = Result
+  )
+
+required_leave_one_location_columns <- c(
+  "Rufous__Latitude",
+  "Rufous__Longitude",
+  "Black-chinned__Latitude",
+  "Black-chinned__Longitude",
+  "Ruby-throated__Latitude",
+  "Ruby-throated__Longitude"
+)
+
+stopifnot(
+  all(c("Joint P", "Latitude P", "Longitude P") %in% names(leave_one_location_lrt_compact)),
+  all(required_leave_one_location_columns %in% names(leave_one_location_age_compact))
+)
+
+table_s9_leave_one_location_out <- leave_one_location_lookup %>%
+  left_join(
+    leave_one_location_lrt_compact,
+    by = "Omitted_station"
+  ) %>%
+  left_join(
+    leave_one_location_age_compact,
+    by = "Omitted_station"
+  ) %>%
+  transmute(
+    `Omitted location`,
+    `n omitted` = fmt_count(`n omitted`),
+    `% omitted` = `% primary omitted`,
+    `Joint P`,
+    `Latitude P`,
+    `Longitude P`,
+    `Rufous lat. β (P)` = `Rufous__Latitude`,
+    `Rufous lon. β (P)` = `Rufous__Longitude`,
+    `Black-chinned lat. β (P)` = `Black-chinned__Latitude`,
+    `Black-chinned lon. β (P)` = `Black-chinned__Longitude`,
+    `Ruby-throated lat. β (P)` = `Ruby-throated__Latitude`,
+    `Ruby-throated lon. β (P)` = `Ruby-throated__Longitude`
+  )
+
+stopifnot(nrow(table_s9_leave_one_location_out) == 4L)
+
+caption_s9_leave_one_location_out <- paste0(
+  "Supplementary Material Table S9. Leave-one-high-volume-location-out sensitivity analysis. ",
+  "The four highest-volume reported locations were omitted individually. Joint, latitude, and ",
+  "longitude columns show likelihood-ratio test probability values; species-specific cells show ",
+  "immature–adult slope differences with probability values in parentheses."
+)
+
+ft_s9_leave_one_location_out <- nice_ft(table_s9_leave_one_location_out)
+
+
+# ============================================================
+# TABLE S10. Sampling-date and 97°W western-boundary robustness analyses
+# ============================================================
+
+# Panel A: joint, latitude, and longitude interaction tests under each
+# robustness check.
+date_covariate_lrt_table <- as.data.frame(
+  date_covariate_lrt
+) %>%
+  filter(
+    grepl("geography|latitude|longitude", Test, ignore.case = TRUE)
+  ) %>%
+  transmute(
+    Analysis = "Day-of-window covariate",
+    Test = case_when(
+      grepl("geography", Test, ignore.case = TRUE) ~
+        "Species × age × geography",
+      grepl("latitude", Test, ignore.case = TRUE) ~
+        "Species × age × latitude",
+      grepl("longitude", Test, ignore.case = TRUE) ~
+        "Species × age × longitude",
+      TRUE ~ Test
+    ),
+    `χ²` = fmt_num(Chi_square, 1),
+    df = as.integer(df),
+    p = fmt_p(p)
+  )
+
+boundary_97w_lrt_table <- as.data.frame(
+  longitude_boundary_lrt
+) %>%
+  filter(
+    grepl("geography|latitude|longitude", Test, ignore.case = TRUE)
+  ) %>%
+  transmute(
+    Analysis = "East of 97°W",
+    Test = case_when(
+      grepl("geography", Test, ignore.case = TRUE) ~
+        "Species × age × geography",
+      grepl("latitude", Test, ignore.case = TRUE) ~
+        "Species × age × latitude",
+      grepl("longitude", Test, ignore.case = TRUE) ~
+        "Species × age × longitude",
+      TRUE ~ Test
+    ),
+    `χ²` = fmt_num(Chi_square, 1),
+    df = as.integer(df),
+    p = fmt_p(p)
+  )
+
+stopifnot(
+  nrow(date_covariate_lrt_table) == 3L,
+  nrow(boundary_97w_lrt_table) == 3L
+)
+
+table_s10_interaction_tests <- bind_rows(
+  date_covariate_lrt_table,
+  boundary_97w_lrt_table
+)
+
+stopifnot(nrow(table_s10_interaction_tests) == 6L)
+
+# Panel B: the two prespecified within-species contrasts emphasized in the
+# manuscript under each robustness check.
+select_focal_robustness_differences <- function(x, analysis_label) {
+  as.data.frame(x) %>%
+    filter(
+      (Species == "Rufous" & Axis == "Latitude") |
+        (Species == "Black-chinned" & Axis == "Longitude")
+    ) %>%
+    transmute(
+      Analysis = analysis_label,
+      Species = as.character(Species),
+      Axis = as.character(Axis),
+      Estimate = fmt_num(Estimate, 2),
+      SE = fmt_num(SE, 2),
+      `95% CI` = fmt_ci(CI_low, CI_high, 2),
+      p = fmt_p(p)
+    )
+}
+
+table_s10_focal_contrasts <- bind_rows(
+  select_focal_robustness_differences(
+    date_covariate_differences,
+    "Day-of-window covariate"
+  ),
+  select_focal_robustness_differences(
+    longitude_boundary_differences,
+    "East of 97°W"
+  )
+)
+
+stopifnot(nrow(table_s10_focal_contrasts) == 4L)
+
+caption_s10_additional_robustness <- paste0(
+  "Supplementary Material Table S10. Sampling-date and 97°W western-boundary robustness analyses. ",
+  "Panel A shows joint, latitude, and longitude likelihood-ratio tests; Panel B shows the focal ",
+  "Rufous latitude and Black-chinned longitude immature–adult contrasts."
+)
+
+ft_s10_interaction_tests <- nice_ft(table_s10_interaction_tests)
+ft_s10_focal_contrasts <- nice_ft(table_s10_focal_contrasts)
+
+
+# ============================================================
+# 3. FORMAT SUPPLEMENTARY TABLES FOR WORD
+# ============================================================
+
+# Store each final supplementary table in a named entry matching its final
+# Supplementary Material table number, caption, panel labels, and orientation.
+supplement_entries <- list(
+  S1 = list(
+    caption = caption_s1_demographic_composition,
+    tables = list(ft_s1_demographic_composition),
+    panel_labels = NULL,
+    orientation = "landscape"
+  ),
+  S2 = list(
+    caption = caption_s2_supporting_species_uncertainty,
+    tables = list(ft_s2_supporting_species_uncertainty),
+    panel_labels = NULL,
+    orientation = "landscape"
+  ),
+  S3 = list(
+    caption = caption_s3_age_specific_slopes,
+    tables = list(ft_s3_age_specific_slopes),
+    panel_labels = NULL,
+    orientation = "portrait"
+  ),
+  S4 = list(
+    caption = caption_s4_geographic_sampling_support,
+    tables = list(ft_s4_geographic_sampling_support),
+    panel_labels = NULL,
+    orientation = "portrait"
+  ),
+  S5 = list(
+    caption = caption_s5_interspecific_contrasts,
+    tables = list(ft_s5_interspecific_contrasts),
+    panel_labels = NULL,
+    orientation = "portrait"
+  ),
+  S6 = list(
+    caption = caption_s6_primary_glmm,
+    tables = list(ft_s6_fixed_effects, ft_s6_random_effects),
+    panel_labels = c("Fixed effects", "Random effects"),
+    orientation = "portrait"
+  ),
+  S7 = list(
+    caption = caption_s7_gamm_sensitivity,
+    caption_runs = caption_s7_gamm_sensitivity_runs,
+    tables = list(ft_s7_gamm_summary),
+    panel_labels = NULL,
+    orientation = "landscape"
+  ),
+  S8 = list(
+    caption = caption_s8_temporal_confounding,
+    tables = list(ft_s8_temporal_lrt, ft_s8_temporal_effects, ft_s8_temporal_variance),
+    panel_labels = c(
+      "Panel A. Omnibus tests",
+      "Panel B. Slope differences and longitude species contrasts",
+      "Panel C. Geographic variance retained after within-year centering"
+    ),
+    orientation = "landscape"
+  ),
+  S9 = list(
+    caption = caption_s9_leave_one_location_out,
+    tables = list(ft_s9_leave_one_location_out),
+    panel_labels = NULL,
+    orientation = "landscape"
+  ),
+  S10 = list(
+    caption = caption_s10_additional_robustness,
+    tables = list(ft_s10_interaction_tests, ft_s10_focal_contrasts),
+    panel_labels = c(
+      "Panel A. Interaction tests",
+      "Panel B. Focal within-species contrasts"
+    ),
+    orientation = "portrait"
+  )
+)
+
+stopifnot(length(supplement_entries) == 10L)
+
+# Use consistent margins across portrait and landscape sections.
+aos_margins <- page_mar(
+  top = 1,
+  bottom = 1,
+  left = 1,
+  right = 1,
+  header = 0.5,
+  footer = 0.5
+)
+
+# Add page numbers in the footer.
+page_number_footer <- block_list(
+  fpar(
+    run_word_field(
+      field = "PAGE",
+      prop = fp_text(
+        font.family = "Times New Roman",
+        font.size = 12
+      )
+    ),
+    fp_p = fp_par(
+      text.align = "center",
+      line_spacing = 1
     )
   )
-  
-  doc <- body_add_flextable(
-    doc,
-    supplement_tables[[i]]
+)
+
+portrait_properties <- prop_section(
+  page_size = page_size(
+    width = 8.5,
+    height = 11,
+    orient = "portrait"
+  ),
+  page_margins = aos_margins,
+  type = "nextPage",
+  footer_default = page_number_footer
+)
+
+landscape_properties <- prop_section(
+  page_size = page_size(
+    width = 11,
+    height = 8.5,
+    orient = "landscape"
+  ),
+  page_margins = aos_margins,
+  type = "nextPage",
+  footer_default = page_number_footer
+)
+
+# Define the final portrait section without an additional page break.
+portrait_final_properties <- prop_section(
+  page_size = page_size(
+    width = 8.5,
+    height = 11,
+    orient = "portrait"
+  ),
+  page_margins = aos_margins,
+  type = "continuous",
+  footer_default = page_number_footer
+)
+
+# Panel labels are separate paragraphs above their tables.
+panel_text_fp <- fp_text(
+  font.family = "Times New Roman",
+  font.size = 12,
+  bold = TRUE,
+  italic = FALSE
+)
+
+panel_fp <- fp_par(
+  text.align = "left",
+  padding.top = 0,
+  padding.bottom = 0,
+  line_spacing = 1,
+  keep_with_next = TRUE
+)
+
+# Italicize statistical symbols inside compound headers.
+compose_n_pct_header <- function(ft, column, prefix) {
+  compose(
+    ft,
+    j = column,
+    part = "header",
+    value = as_paragraph(
+      prefix,
+      as_i("n"),
+      " (%)"
+    )
   )
 }
 
-# Apply the landscape section to the document.
-doc <- body_set_default_section(
-  doc,
-  landscape_properties
+compose_p_header <- function(ft, column, prefix, suffix = "") {
+  compose(
+    ft,
+    j = column,
+    part = "header",
+    value = as_paragraph(
+      prefix,
+      as_i("P"),
+      suffix
+    )
+  )
+}
+
+ft_s1_demographic_composition <- compose_n_pct_header(ft_s1_demographic_composition, "Immature, n (%)", "Immature, ")
+ft_s1_demographic_composition <- compose_n_pct_header(ft_s1_demographic_composition, "Female overall, n (%)", "Female overall, ")
+ft_s1_demographic_composition <- compose_n_pct_header(ft_s1_demographic_composition, "Adult female, n (%)", "Adult female, ")
+ft_s1_demographic_composition <- compose_n_pct_header(ft_s1_demographic_composition, "Immature female, n (%)", "Immature female, ")
+
+ft_s2_supporting_species_uncertainty <- compose_n_pct_header(ft_s2_supporting_species_uncertainty, "Unknown sex, n (%)", "Unknown sex, ")
+ft_s2_supporting_species_uncertainty <- compose_n_pct_header(
+  ft_s2_supporting_species_uncertainty,
+  "Unclassifiable age, n (%)",
+  "Unclassifiable age, "
+)
+
+# Use merged spanning headers for the leave-one-location-out table.
+ft_s9_leave_one_location_out <- set_header_labels(
+  ft_s9_leave_one_location_out,
+  `Joint P` = "Joint P",
+  `Latitude P` = "Lat. P",
+  `Longitude P` = "Lon. P",
+  `Rufous lat. β (P)` = "Lat. β (P)",
+  `Rufous lon. β (P)` = "Lon. β (P)",
+  `Black-chinned lat. β (P)` = "Lat. β (P)",
+  `Black-chinned lon. β (P)` = "Lon. β (P)",
+  `Ruby-throated lat. β (P)` = "Lat. β (P)",
+  `Ruby-throated lon. β (P)` = "Lon. β (P)"
+)
+
+ft_s9_leave_one_location_out <- compose(
+  ft_s9_leave_one_location_out,
+  j = "n omitted",
+  part = "header",
+  value = as_paragraph(as_i("n"), " omitted")
+)
+
+ft_s9_leave_one_location_out <- compose_p_header(ft_s9_leave_one_location_out, "Joint P", "Joint ")
+ft_s9_leave_one_location_out <- compose_p_header(ft_s9_leave_one_location_out, "Latitude P", "Lat. ")
+ft_s9_leave_one_location_out <- compose_p_header(ft_s9_leave_one_location_out, "Longitude P", "Lon. ")
+ft_s9_leave_one_location_out <- compose_p_header(ft_s9_leave_one_location_out, "Rufous lat. β (P)", "Lat. β (", ")")
+ft_s9_leave_one_location_out <- compose_p_header(ft_s9_leave_one_location_out, "Rufous lon. β (P)", "Lon. β (", ")")
+ft_s9_leave_one_location_out <- compose_p_header(
+  ft_s9_leave_one_location_out,
+  "Black-chinned lat. β (P)",
+  "Lat. β (",
+  ")"
+)
+ft_s9_leave_one_location_out <- compose_p_header(
+  ft_s9_leave_one_location_out,
+  "Black-chinned lon. β (P)",
+  "Lon. β (",
+  ")"
+)
+ft_s9_leave_one_location_out <- compose_p_header(
+  ft_s9_leave_one_location_out,
+  "Ruby-throated lat. β (P)",
+  "Lat. β (",
+  ")"
+)
+ft_s9_leave_one_location_out <- compose_p_header(
+  ft_s9_leave_one_location_out,
+  "Ruby-throated lon. β (P)",
+  "Lon. β (",
+  ")"
+)
+
+ft_s9_leave_one_location_out <- add_header_row(
+  ft_s9_leave_one_location_out,
+  values = c(
+    "", "", "",
+    "Omnibus LRT",
+    "Rufous",
+    "Black-chinned",
+    "Ruby-throated"
+  ),
+  colwidths = c(1, 1, 1, 3, 2, 2, 2),
+  top = TRUE
+) %>%
+  bold(part = "header") %>%
+  align(align = "left", part = "header")
+
+# Format k and P as statistical symbols in the GAMM diagnostic headings.
+ft_s7_gamm_summary <- set_header_labels(
+  ft_s7_gamm_summary,
+  `Reference df` = "Ref. df"
+)
+
+ft_s7_gamm_summary <- compose(
+  ft_s7_gamm_summary,
+  j = "k-index",
+  part = "header",
+  value = as_paragraph(as_i("k"), "-index")
+)
+
+ft_s7_gamm_summary <- compose(
+  ft_s7_gamm_summary,
+  j = "k-check p",
+  part = "header",
+  value = as_paragraph(as_i("k"), "-check ", as_i("P"))
+)
+
+# Update stored table objects after composing statistical headers.
+supplement_entries$S1$tables[[1L]] <- ft_s1_demographic_composition
+supplement_entries$S2$tables[[1L]] <- ft_s2_supporting_species_uncertainty
+supplement_entries$S7$tables[[1L]] <- ft_s7_gamm_summary
+supplement_entries$S9$tables[[1L]] <- ft_s9_leave_one_location_out
+
+# Reapply common typography after composing headers.
+all_supplement_flextables <- unlist(
+  lapply(supplement_entries, function(entry) entry$tables),
+  recursive = FALSE
+)
+
+all_supplement_flextables <- lapply(
+  all_supplement_flextables,
+  function(ft) {
+    ft %>%
+      font(fontname = "Times New Roman", part = "all") %>%
+      fontsize(size = 12, part = "all") %>%
+      bold(part = "header") %>%
+      align(align = "left", part = "all") %>%
+      valign(valign = "top", part = "all") %>%
+      line_spacing(space = 1, part = "all") %>%
+      padding(padding = 1, part = "all") %>%
+      border_remove() %>%
+      set_table_properties(
+        layout = "autofit",
+        width = 1,
+        align = "left",
+        opts_word = list(
+          split = FALSE,
+          keep_with_next = FALSE,
+          repeat_headers = TRUE
+        )
+      )
+  }
+)
+
+# Update stored tables after formatting.
+flextable_index <- 1L
+for (entry_index in seq_along(supplement_entries)) {
+  entry_table_count <- length(supplement_entries[[entry_index]]$tables)
+  supplement_entries[[entry_index]]$tables <- all_supplement_flextables[
+    flextable_index:(flextable_index + entry_table_count - 1L)
+  ]
+  flextable_index <- flextable_index + entry_table_count
+}
+
+# Set stable column widths for portrait and landscape pages.
+set_fixed_widths <- function(ft, widths) {
+  stopifnot(length(widths) == ncol(ft$body$dataset))
+  for (column_index in seq_along(widths)) {
+    ft <- width(ft, j = column_index, width = widths[column_index])
+  }
+  set_table_properties(
+    ft,
+    layout = "fixed",
+    width = 1,
+    align = "left",
+    opts_word = list(
+      split = FALSE,
+      keep_with_next = FALSE,
+      repeat_headers = TRUE
+    )
+  )
+}
+
+# S1. Demographic composition.
+supplement_entries$S1$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S1$tables[[1L]],
+  c(1.15, 0.55, 1.10, 1.25, 1.20, 1.25)
+)
+
+# S2. Supporting-species demographic uncertainty.
+supplement_entries$S2$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S2$tables[[1L]],
+  c(1.10, 1.20, 1.15, 1.30, 1.45, 1.40, 1.40)
+)
+
+# S3. Primary age-specific geographic slopes.
+supplement_entries$S3$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S3$tables[[1L]],
+  c(0.70, 1.10, 0.75, 0.75, 0.55, 1.30, 0.55, 0.55)
+)
+
+# S4. Geographic sampling support.
+supplement_entries$S4$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S4$tables[[1L]],
+  c(1.20, 1.00, 0.95, 1.20, 1.00, 1.15)
+)
+
+# S5. Primary pairwise interspecific contrasts.
+supplement_entries$S5$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S5$tables[[1L]],
+  c(0.70, 1.90, 0.80, 0.60, 1.45, 0.55, 0.50)
+)
+
+# S6. Primary comparative GLMM fixed and random effects.
+supplement_entries$S6$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S6$tables[[1L]],
+  c(2.55, 0.75, 0.60, 1.40, 0.60, 0.60)
+)
+supplement_entries$S6$tables[[2L]] <- set_fixed_widths(
+  supplement_entries$S6$tables[[2L]],
+  c(3.00, 0.70, 1.35, 1.35)
+)
+supplement_entries$S6$tables[[2L]] <- set_table_properties(
+  supplement_entries$S6$tables[[2L]],
+  layout = "fixed",
+  width = 1,
+  align = "left",
+  opts_word = list(
+    split = FALSE,
+    keep_with_next = TRUE,
+    repeat_headers = TRUE
+  )
+)
+
+# S7. GAMM nonlinear-spatial sensitivity.
+supplement_entries$S7$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S7$tables[[1L]],
+  c(1.05, 0.55, 1.75, 0.55, 0.70, 0.65, 0.45, 0.65, 0.80, 1.00)
+)
+
+# S8. Temporal-confounding robustness.
+supplement_entries$S8$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S8$tables[[1L]],
+  c(4.30, 1.20, 0.80, 0.80)
+)
+supplement_entries$S8$tables[[2L]] <- set_fixed_widths(
+  supplement_entries$S8$tables[[2L]],
+  c(0.90, 3.05, 0.80, 0.60, 1.60, 0.65, 0.65)
+)
+supplement_entries$S8$tables[[3L]] <- set_fixed_widths(
+  supplement_entries$S8$tables[[3L]],
+  c(1.50, 3.00, 3.00)
+)
+supplement_entries$S8$tables[[3L]] <- set_table_properties(
+  supplement_entries$S8$tables[[3L]],
+  layout = "fixed",
+  width = 1,
+  align = "left",
+  opts_word = list(
+    split = FALSE,
+    keep_with_next = TRUE,
+    repeat_headers = TRUE
+  )
+)
+
+# S9. Leave-one-high-volume-location-out sensitivity.
+supplement_entries$S9$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S9$tables[[1L]],
+  c(1.15, 0.50, 0.55, 0.50, 0.50, 0.50, 0.80, 0.80, 0.90, 0.90, 0.90, 0.90)
+)
+
+# S10. Sampling-date and western-boundary robustness.
+supplement_entries$S10$tables[[1L]] <- set_fixed_widths(
+  supplement_entries$S10$tables[[1L]],
+  c(1.70, 2.50, 0.90, 0.55, 0.55)
+)
+supplement_entries$S10$tables[[2L]] <- set_fixed_widths(
+  supplement_entries$S10$tables[[2L]],
+  c(1.55, 1.00, 0.70, 0.70, 0.55, 1.40, 0.50)
+)
+
+# ------------------------------------------------------------
+# Emphasize row-label columns; numerical/statistical cells remain roman.
+# ------------------------------------------------------------
+bold_body_column <- function(ft, column) {
+  if (!column %in% names(ft$body$dataset)) {
+    stop("Cannot bold missing body column: ", column)
+  }
+  bold(ft, j = column, part = "body")
+}
+
+# S1. Demographic composition.
+supplement_entries$S1$tables[[1L]] <- bold_body_column(
+  supplement_entries$S1$tables[[1L]], "Species"
+)
+
+# S2. Supporting-species demographic uncertainty.
+supplement_entries$S2$tables[[1L]] <- bold_body_column(
+  supplement_entries$S2$tables[[1L]], "Species"
+)
+
+# S3. Primary age-specific geographic slopes.
+supplement_entries$S3$tables[[1L]] <- bold_body_column(
+  supplement_entries$S3$tables[[1L]], "Species"
+)
+
+# S4. Geographic sampling support.
+supplement_entries$S4$tables[[1L]] <- bold_body_column(
+  supplement_entries$S4$tables[[1L]], "Species"
+)
+
+# S5. Primary pairwise interspecific contrasts.
+supplement_entries$S5$tables[[1L]] <- bold_body_column(
+  supplement_entries$S5$tables[[1L]], "Contrast"
+)
+
+# S6. Primary comparative GLMM fixed and random effects.
+supplement_entries$S6$tables[[1L]] <- bold_body_column(
+  supplement_entries$S6$tables[[1L]], "Term"
+)
+supplement_entries$S6$tables[[2L]] <- bold_body_column(
+  supplement_entries$S6$tables[[2L]], "Random effect"
+)
+
+# S7. GAMM nonlinear-spatial sensitivity.
+supplement_entries$S7$tables[[1L]] <- bold_body_column(
+  supplement_entries$S7$tables[[1L]], "Species"
+)
+
+# S8. Temporal-confounding robustness.
+supplement_entries$S8$tables[[1L]] <- bold_body_column(
+  supplement_entries$S8$tables[[1L]], "Test"
+)
+supplement_entries$S8$tables[[2L]] <- bold_body_column(
+  supplement_entries$S8$tables[[2L]], "Comparison"
+)
+supplement_entries$S8$tables[[3L]] <- bold_body_column(
+  supplement_entries$S8$tables[[3L]], "Species"
+)
+
+# S9. Leave-one-high-volume-location-out sensitivity.
+supplement_entries$S9$tables[[1L]] <- bold_body_column(
+  supplement_entries$S9$tables[[1L]], "Omitted location"
+)
+
+# S10. Sampling-date and western-boundary robustness.
+supplement_entries$S10$tables[[1L]] <- bold_body_column(
+  supplement_entries$S10$tables[[1L]], "Test"
+)
+supplement_entries$S10$tables[[2L]] <- bold_body_column(
+  supplement_entries$S10$tables[[2L]], "Species"
+)
+
+# ============================================================
+# 4. FINAL TABLE ORDER AND PAGE GROUPING
+#
+# Tables are stored and written in final numerical order. S1 and S2 share the
+# first landscape page; each remaining table begins on a new page.
+# ============================================================
+
+supplement_page_groups <- list(
+  list(
+    orientation = "landscape",
+    blocks = list(
+      supplement_entries$S1,
+      supplement_entries$S2
+    )
+  ),
+  list(
+    orientation = "portrait",
+    blocks = list(supplement_entries$S3)
+  ),
+  list(
+    orientation = "portrait",
+    blocks = list(supplement_entries$S4)
+  ),
+  list(
+    orientation = "portrait",
+    blocks = list(supplement_entries$S5)
+  ),
+  list(
+    orientation = "portrait",
+    blocks = list(supplement_entries$S6)
+  ),
+  list(
+    orientation = "landscape",
+    blocks = list(supplement_entries$S7)
+  ),
+  list(
+    orientation = "landscape",
+    blocks = list(supplement_entries$S8)
+  ),
+  list(
+    orientation = "landscape",
+    blocks = list(supplement_entries$S9)
+  ),
+  list(
+    orientation = "portrait",
+    blocks = list(supplement_entries$S10)
+  )
+)
+
+stopifnot(
+  length(supplement_page_groups) == 9L,
+  sum(vapply(
+    supplement_page_groups,
+    function(x) length(x$blocks),
+    integer(1)
+  )) == 10L
+)
+
+# ============================================================
+# 5. WRITE FINAL SUPPLEMENT TO WORD
+# ============================================================
+
+supplement_doc <- read_docx()
+
+for (page_group_index in seq_along(supplement_page_groups)) {
+  page_group <- supplement_page_groups[[page_group_index]]
+  
+  for (block_index in seq_along(page_group$blocks)) {
+    table_block <- page_group$blocks[[block_index]]
+    
+    caption_runs <- if (!is.null(table_block$caption_runs)) {
+      table_block$caption_runs
+    } else {
+      list(ftext(table_block$caption, prop = caption_text_fp))
+    }
+    
+    supplement_doc <- body_add_fpar(
+      supplement_doc,
+      do.call(
+        fpar,
+        c(caption_runs, list(fp_p = caption_fp))
+      )
+    )
+    
+    for (table_index in seq_along(table_block$tables)) {
+      if (!is.null(table_block$panel_labels)) {
+        supplement_doc <- body_add_fpar(
+          supplement_doc,
+          fpar(
+            ftext(
+              table_block$panel_labels[table_index],
+              prop = panel_text_fp
+            ),
+            fp_p = panel_fp
+          )
+        )
+      }
+      
+      supplement_doc <- body_add_flextable(
+        supplement_doc,
+        table_block$tables[[table_index]]
+      )
+    }
+  }
+  
+  # Start each later page group on a new page, using a section break when
+  # the page orientation changes.
+  if (page_group_index < length(supplement_page_groups)) {
+    next_page_orientation <-
+      supplement_page_groups[[page_group_index + 1L]]$orientation
+    
+    if (identical(page_group$orientation, next_page_orientation)) {
+      supplement_doc <- body_add_break(supplement_doc, pos = "after")
+    } else {
+      current_section_properties <-
+        if (identical(page_group$orientation, "landscape")) {
+          landscape_properties
+        } else {
+          portrait_properties
+        }
+      
+      supplement_doc <- body_end_block_section(
+        supplement_doc,
+        block_section(current_section_properties)
+      )
+    }
+  }
+}
+
+# End with the final portrait section.
+supplement_doc <- body_set_default_section(
+  supplement_doc,
+  portrait_final_properties
 )
 
 print(
-  doc,
+  supplement_doc,
   target = "Supplementary_Tables.docx"
 )
+
