@@ -2,24 +2,60 @@
 
 This repository contains the R code used for the primary analyses, sensitivity analyses, figures, and supplementary tables for the winter hummingbird study.
 
+## Citation
+
+If you use this code, please cite the archived release:
+
+> Clarkson, A. E., B. A. Schwab, and C. J. Butler (2026). Code from: Age-specific geographic variation in sex ratios differs among hummingbird species wintering in eastern North America. Zenodo. https://doi.org/10.5281/zenodo.22284800
+
+and the underlying data:
+
+> Nakash, E., M. Malorodova, L.-A. Howes, and A. Celis-Murillo (2025). North American Bird Banding Program dataset 1960–2025 retrieved 2025-07-11. U.S. Geological Survey data release. https://doi.org/10.5066/P1KPZGAR
+
+## License
+
+The code in this repository is released under the MIT License. See [`LICENSE`](LICENSE) for the full text.
+
 ## Files
 
 - `01_functions.R` — reusable data-preparation, model-fitting, and robustness-analysis functions.
 - `02_primary_analysis.R` — reads the BBL data, builds the six species datasets, fits the primary three-species GLMM, summarizes the structure and record-type composition of the primary dataset, and calculates response-scale effect sizes reported in the manuscript.
 - `03_sensitivity_analysis.R` — runs missing-data bounds, January age-classification checks, day-of-window and western-boundary sensitivity analyses, temporal-confounding analyses, leave-one-high-volume-location-out analyses, primary-model diagnostics including residual spatial autocorrelation, geographic variance-retention calculations, and nonlinear spatial GAMM sensitivity analyses.
-- `04_figures.R` — generates Figures 1-4 and saves each figure as both PNG and vector PDF. Also generates Table 1.
-- `05_supplement.R` — generates Supplementary Tables S1-S10 and saves them as `Supplementary_Tables.docx`.
+- `04_figures.R` — generates Figures 1–4 and saves each figure as both PNG and vector PDF. Also generates Table 1.
+- `05_supplement.R` — generates Supplementary Tables S1–S10 and saves them as `Supplementary_Tables.docx`.
 - `gamm_results_PRIMARY_NOV15_DEC31_EPSG5070.rds` — cached results from the final nonlinear spatial GAMM analyses and basis-dimension checks.
 
 ## Input data
 
-Place the Bird Banding Laboratory data extract
+The analyses use a single input file, the hummingbird species group (group 13) extract from the North American Bird Banding Program dataset:
 
 `NABBP_2025_grp_13.csv`
 
-in the working directory containing the R scripts. The file can be downloaded at [ScienceBase](https://www.sciencebase.gov/catalog/item/68837a85d4be027deba86316).
+Download it from the U.S. Geological Survey data release at https://doi.org/10.5066/P1KPZGAR (the file is also reachable directly through the [ScienceBase catalog item](https://www.sciencebase.gov/catalog/item/68837a85d4be027deba86316)), and place it in the repository root alongside the R scripts.
+
+**Version note.** The analyses reported in the manuscript used the extract retrieved on **2025-07-11**, which contains 1,186,275 rows. USGS data releases are periodically revised, and a later version of this file may not reproduce the reported record counts exactly. If your download differs in row count from the value above, you have a different version of the release.
+
+## Software requirements
+
+The final analyses were run under R 4.6.1. Full version information for every attached and loaded package is given in the [R session information](#r-session-information) section below.
+
+Install the contributed packages used by the analysis with:
+
+```r
+install.packages(c(
+  "data.table", "dplyr", "tidyr", "purrr",
+  "lme4", "emmeans", "DHARMa", "ape", "mgcv",
+  "sf", "ggplot2", "scales",
+  "rnaturalearth", "rnaturalearthdata",
+  "broom.mixed", "flextable", "officer"
+))
+```
+
+`sf` requires the system libraries GDAL, GEOS, and PROJ. These are bundled with the macOS and Windows CRAN binaries but must be installed separately on most Linux distributions (e.g. `libgdal-dev`, `libgeos-dev`, `libproj-dev` on Debian/Ubuntu). This is the most common installation failure point.
 
 ## Run order
+
+The scripts assume that the working directory is the repository root and use relative paths throughout. No script calls `setwd()`.
 
 `02_primary_analysis.R` automatically sources `01_functions.R`. From a clean R session, run:
 
@@ -30,7 +66,15 @@ source("04_figures.R")
 source("05_supplement.R")
 ```
 
-The primary model is fit in `02_primary_analysis.R`. The figure and supplement scripts use objects created by the primary and sensitivity scripts and do not alter the primary model.
+**Scripts `02`–`05` must be run sequentially within the same R session.** Scripts `03`, `04`, and `05` depend on objects created by the scripts before them and will fail if sourced on their own in a fresh session. The primary model is fit in `02_primary_analysis.R`; the sensitivity, figure, and supplement scripts read that model but do not alter it.
+
+### Approximate runtimes
+
+On the machine described in the session information below:
+
+- `02_primary_analysis.R` — approximately 5 minutes, including the roughly 1 minute needed to source `01_functions.R`.
+- `03_sensitivity_analysis.R` — approximately 10 minutes when the GAMM cache is present, and approximately 90 minutes when the GAMMs are refit from scratch.
+- `04_figures.R` and `05_supplement.R` — approximately 1 minute each.
 
 ## GAMM results cache
 
@@ -51,7 +95,6 @@ Running `04_figures.R` creates:
 - `Figure3.png` and `Figure3.pdf`
 - `Figure4.png` and `Figure4.pdf`
 - `Table1.docx`
-
 
 Running `05_supplement.R` creates:
 
