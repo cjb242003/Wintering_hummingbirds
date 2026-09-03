@@ -1,0 +1,55 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+title: "Code from: Age-specific geographic variation in sex ratios differs among hummingbird species wintering in eastern North America"
+abstract: >-
+  R code used for the primary generalized linear mixed model analyses,
+  sensitivity analyses, figures, and supplementary tables examining
+  age-specific geographic variation in winter sex ratios of Rufous
+  (Selasphorus rufus), Black-chinned (Archilochus alexandri), and
+  Ruby-throated (Archilochus colubris) Hummingbirds wintering in eastern
+  North America, based on U.S. Geological Survey Bird Banding Laboratory
+  records from 1960-2025.
+type: software
+authors:
+  - family-names: Clarkson
+    given-names: Aeris
+    name-particle: E.
+    orcid: "https://orcid.org/0009-0004-6059-2041"
+    affiliation: "Department of Biology, Texas A&M University, College Station, TX, USA"
+  - family-names: Schwab
+    given-names: Brady
+    name-particle: A.
+    orcid: "https://orcid.org/0009-0009-0281-4466"
+    affiliation: "Department of Statistics, Texas A&M University, College Station, TX, USA"
+  - family-names: Butler
+    given-names: Christopher
+    name-particle: J.
+    orcid: "https://orcid.org/0000-0003-2585-9041"
+    affiliation: "Department of Biology, Texas A&M University, College Station, TX, USA"
+version: 1.0.0
+date-released: "2026-09-03"
+license: MIT
+repository-code: "https://github.com/cjb242003/Wintering_hummingbirds"
+keywords:
+  - hummingbird
+  - sex ratio
+  - differential migration
+  - bird banding
+  - generalized linear mixed model
+  - occupancy of wintering range
+references:
+  - type: data
+    title: "North American Bird Banding Program dataset 1960-2025 retrieved 2025-07-11"
+    year: 2025
+    doi: "10.5066/P1KPZGAR"
+    publisher:
+      name: "U.S. Geological Survey"
+    authors:
+      - family-names: Nakash
+        given-names: Elizabeth
+      - family-names: Malorodova
+        given-names: Marina
+      - family-names: Howes
+        given-names: Lee-Anne
+      - family-names: Celis-Murillo
+        given-names: Antonio
