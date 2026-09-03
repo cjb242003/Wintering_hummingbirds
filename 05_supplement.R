@@ -660,7 +660,7 @@ supporting_species_missingness <- as.data.frame(
   ) %>%
   transmute(
     Species = as.character(Species),
-    `Selected bird-years` = fmt_count(Total_selected_bird_years),
+    `Records` = fmt_count(Total_selected_bird_years),
     `Unknown sex, n (%)` =
       sprintf(
         "%s (%.1f)",
@@ -743,7 +743,9 @@ stopifnot(nrow(table_s2_supporting_species_uncertainty) == length(descriptive_sp
 caption_s2_supporting_species_uncertainty <- paste0(
   "Supplementary Material Table S2. Missing demographic information and extreme-allocation ",
   "bounds for Calliope, Broad-tailed, and Allen’s Hummingbirds. Ranges show the minimum and ",
-  "maximum percentages under extreme allocation of records with unclassifiable age or unknown sex."
+  "maximum percentages under extreme allocation of records with unclassifiable age or unknown sex. ",
+  "Observed immature percentages are calculated among all records with classifiable age, regardless ",
+  "of whether sex is known, and therefore may differ slightly from Table S1."
 )
 
 ft_s2_supporting_species_uncertainty <- nice_ft(table_s2_supporting_species_uncertainty)
